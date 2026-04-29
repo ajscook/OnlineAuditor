@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
+import { evaluate, Finding, Restaurant, Severity } from './lib/rules';
 
 const PSI_API_KEY = process.env.NEXT_PUBLIC_GOOGLE_API_KEY;
 
@@ -118,6 +119,23 @@ export default function Home() {
   const [serverElapsed, setServerElapsed] = useState<number | null>(null);
   const [totalElapsed, setTotalElapsed] = useState<number | null>(null);
 
+  // Findings recompute whenever restaurant state changes (PSI calls finishing).
+  // We only show findings once all PSI calls have either completed or errored,
+  // because some rules depend on competitor PSI scores.
+  const findings = useMemo<Finding[]>(() => {
+    if (restaurants.length === 0) return [];
+    if (running) return [];
+    const mapped: Restaurant[] = restaurants.map((r) => ({
+      name: r.name,
+      isSubject: r.isSubject,
+      places: r.places,
+      onpage: r.onpage,
+      psiMobile: r.psiMobile,
+      psiDesktop: r.psiDesktop,
+    }));
+    return evaluate(mapped);
+  }, [restaurants, running]);
+
   async function runAudit() {
     if (!PSI_API_KEY) {
       alert('NEXT_PUBLIC_GOOGLE_API_KEY is missing in Vercel env vars.');
@@ -131,7 +149,6 @@ export default function Home() {
 
     const startWall = performance.now();
 
-    // Step 1: get places + onpage data for all five restaurants from the server.
     let auditData: AuditResponse;
     try {
       const res = await fetch('/api/audit');
@@ -145,7 +162,6 @@ export default function Home() {
       return;
     }
 
-    // Initialize restaurant states with the server data.
     const initial: RestaurantState[] = auditData.results.map((r) => ({
       name: r.places?.name ?? '(name missing)',
       website: r.places?.website ?? null,
@@ -160,8 +176,6 @@ export default function Home() {
     }));
     setRestaurants(initial);
 
-    // Step 2: run PSI for every restaurant + strategy in parallel.
-    // Each result updates state independently as it returns.
     const psiJobs: Promise<void>[] = [];
     initial.forEach((r, i) => {
       if (!r.website) return;
@@ -238,156 +252,225 @@ export default function Home() {
         </p>
       )}
 
+      {findings.length > 0 && <FindingsSection findings={findings} />}
+
       {restaurants.length > 0 && <ComparisonTable restaurants={restaurants} />}
     </main>
   );
 }
 
+function FindingsSection({ findings }: { findings: Finding[] }) {
+  const grouped: Record<Severity, Finding[]> = {
+    critical: findings.filter((f) => f.severity === 'critical'),
+    warning: findings.filter((f) => f.severity === 'warning'),
+    note: findings.filter((f) => f.severity === 'note'),
+  };
+
+  return (
+    <section style={{ marginBottom: 32 }}>
+      <h2 style={{ fontSize: 16, marginTop: 0, marginBottom: 12 }}>
+        Findings <span style={{ color: '#888', fontWeight: 400 }}>({findings.length})</span>
+      </h2>
+      <p style={{ color: '#888', fontSize: 12, marginTop: 0, marginBottom: 16 }}>
+        Subject restaurant only. Detailed metrics for all five restaurants in the comparison table below.
+      </p>
+
+      {grouped.critical.length > 0 && <FindingGroup title="Critical" findings={grouped.critical} color="#b00020" />}
+      {grouped.warning.length > 0 && <FindingGroup title="Warning" findings={grouped.warning} color="#a06800" />}
+      {grouped.note.length > 0 && <FindingGroup title="Note" findings={grouped.note} color="#666" />}
+    </section>
+  );
+}
+
+function FindingGroup({ title, findings, color }: { title: string; findings: Finding[]; color: string }) {
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <h3
+        style={{
+          fontSize: 11,
+          textTransform: 'uppercase',
+          letterSpacing: 0.5,
+          color,
+          marginTop: 0,
+          marginBottom: 8,
+          fontWeight: 600,
+        }}
+      >
+        {title} ({findings.length})
+      </h3>
+      <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+        {findings.map((f) => (
+          <li
+            key={f.ruleId}
+            style={{
+              borderLeft: `3px solid ${color}`,
+              padding: '8px 12px',
+              marginBottom: 8,
+              background: '#fafafa',
+              borderRadius: '0 4px 4px 0',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
+              <span style={{ fontSize: 14, fontWeight: 600 }}>{f.title}</span>
+              <span style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                {f.category}
+              </span>
+            </div>
+            <p style={{ margin: '4px 0 0 0', fontSize: 13, color: '#444', lineHeight: 1.5 }}>{f.detail}</p>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function ComparisonTable({ restaurants }: { restaurants: RestaurantState[] }) {
-  // Reorder so subject is first.
   const ordered = [
     ...restaurants.filter((r) => r.isSubject),
     ...restaurants.filter((r) => !r.isSubject),
   ];
 
   return (
-    <div style={{ overflowX: 'auto' }}>
-      <table
-        style={{
-          width: '100%',
-          borderCollapse: 'collapse',
-          fontSize: 13,
-          tableLayout: 'fixed',
-        }}
-      >
-        <thead>
-          <tr>
-            <th style={headerCellStyle('label')}>&nbsp;</th>
-            {ordered.map((r, i) => (
-              <th key={i} style={headerCellStyle(r.isSubject ? 'subject' : 'comp')}>
-                <div style={{ fontWeight: 600 }}>{r.name}</div>
-                {r.isSubject && (
-                  <div style={{ fontSize: 11, color: '#0066cc', fontWeight: 500 }}>SUBJECT</div>
-                )}
-                {r.places?.address && (
-                  <div style={{ fontSize: 11, color: '#888', fontWeight: 400, marginTop: 2 }}>
-                    {r.places.address.split(',').slice(0, 2).join(',')}
-                  </div>
-                )}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          <SectionRow label="GOOGLE LISTING" colSpan={ordered.length + 1} />
-          <DataRow label="Rating" ordered={ordered} get={(r) => fmtRating(r.places)} />
-          <DataRow label="Review count" ordered={ordered} get={(r) => fmtNum(r.places?.reviewCount)} />
-          <DataRow label="Price level" ordered={ordered} get={(r) => fmtPriceLevel(r.places?.priceLevel)} />
-          <DataRow label="Photos (capped)" ordered={ordered} get={(r) => String(r.places?.photoCount ?? '-')} />
-          <DataRow label="Hours present" ordered={ordered} get={(r) => (r.places?.hoursPresent ? 'yes' : 'no')} />
-          <DataRow label="Primary type" ordered={ordered} get={(r) => r.places?.primaryType ?? '-'} />
+    <details style={{ marginTop: 24 }}>
+      <summary style={{ cursor: 'pointer', fontSize: 14, color: '#555', marginBottom: 12 }}>
+        Detailed comparison data (all five restaurants)
+      </summary>
+      <div style={{ overflowX: 'auto', marginTop: 12 }}>
+        <table
+          style={{
+            width: '100%',
+            borderCollapse: 'collapse',
+            fontSize: 13,
+            tableLayout: 'fixed',
+          }}
+        >
+          <thead>
+            <tr>
+              <th style={headerCellStyle('label')}>&nbsp;</th>
+              {ordered.map((r, i) => (
+                <th key={i} style={headerCellStyle(r.isSubject ? 'subject' : 'comp')}>
+                  <div style={{ fontWeight: 600 }}>{r.name}</div>
+                  {r.isSubject && (
+                    <div style={{ fontSize: 11, color: '#0066cc', fontWeight: 500 }}>SUBJECT</div>
+                  )}
+                  {r.places?.address && (
+                    <div style={{ fontSize: 11, color: '#888', fontWeight: 400, marginTop: 2 }}>
+                      {r.places.address.split(',').slice(0, 2).join(',')}
+                    </div>
+                  )}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            <SectionRow label="GOOGLE LISTING" colSpan={ordered.length + 1} />
+            <DataRow label="Rating" ordered={ordered} get={(r) => fmtRating(r.places)} />
+            <DataRow label="Review count" ordered={ordered} get={(r) => fmtNum(r.places?.reviewCount)} />
+            <DataRow label="Price level" ordered={ordered} get={(r) => fmtPriceLevel(r.places?.priceLevel)} />
+            <DataRow label="Photos (capped)" ordered={ordered} get={(r) => String(r.places?.photoCount ?? '-')} />
+            <DataRow label="Hours present" ordered={ordered} get={(r) => (r.places?.hoursPresent ? 'yes' : 'no')} />
+            <DataRow label="Primary type" ordered={ordered} get={(r) => r.places?.primaryType ?? '-'} />
 
-          <SectionRow label="PAGESPEED — MOBILE" colSpan={ordered.length + 1} />
-          <DataRow
-            label="Performance score"
-            ordered={ordered}
-            get={(r) => (r.psiMobile ? String(r.psiMobile.performance) : r.psiMobileError ? 'err' : '...')}
-            highlight={(r) => psiScoreColor(r.psiMobile?.performance)}
-          />
-          <DataRow label="LCP lab" ordered={ordered} get={(r) => fmtMs(r.psiMobile?.lcp)} />
-          <DataRow label="LCP field p75" ordered={ordered} get={(r) => fmtFieldMs(r.psiMobile?.fieldLcp)} />
-          <DataRow label="CLS lab" ordered={ordered} get={(r) => fmtCls(r.psiMobile?.cls)} />
-          <DataRow label="TBT lab" ordered={ordered} get={(r) => fmtMsRaw(r.psiMobile?.tbt)} />
-          <DataRow label="TTFB" ordered={ordered} get={(r) => fmtMsRaw(r.psiMobile?.ttfb)} />
+            <SectionRow label="PAGESPEED — MOBILE" colSpan={ordered.length + 1} />
+            <DataRow
+              label="Performance score"
+              ordered={ordered}
+              get={(r) => (r.psiMobile ? String(r.psiMobile.performance) : r.psiMobileError ? 'err' : '...')}
+              highlight={(r) => psiScoreColor(r.psiMobile?.performance)}
+            />
+            <DataRow label="LCP lab" ordered={ordered} get={(r) => fmtMs(r.psiMobile?.lcp)} />
+            <DataRow label="LCP field p75" ordered={ordered} get={(r) => fmtFieldMs(r.psiMobile?.fieldLcp)} />
+            <DataRow label="CLS lab" ordered={ordered} get={(r) => fmtCls(r.psiMobile?.cls)} />
+            <DataRow label="TBT lab" ordered={ordered} get={(r) => fmtMsRaw(r.psiMobile?.tbt)} />
+            <DataRow label="TTFB" ordered={ordered} get={(r) => fmtMsRaw(r.psiMobile?.ttfb)} />
 
-          <SectionRow label="PAGESPEED — DESKTOP" colSpan={ordered.length + 1} />
-          <DataRow
-            label="Performance score"
-            ordered={ordered}
-            get={(r) => (r.psiDesktop ? String(r.psiDesktop.performance) : r.psiDesktopError ? 'err' : '...')}
-            highlight={(r) => psiScoreColor(r.psiDesktop?.performance)}
-          />
-          <DataRow label="LCP lab" ordered={ordered} get={(r) => fmtMs(r.psiDesktop?.lcp)} />
-          <DataRow label="CLS lab" ordered={ordered} get={(r) => fmtCls(r.psiDesktop?.cls)} />
-          <DataRow label="TBT lab" ordered={ordered} get={(r) => fmtMsRaw(r.psiDesktop?.tbt)} />
-          <DataRow label="TTFB" ordered={ordered} get={(r) => fmtMsRaw(r.psiDesktop?.ttfb)} />
+            <SectionRow label="PAGESPEED — DESKTOP" colSpan={ordered.length + 1} />
+            <DataRow
+              label="Performance score"
+              ordered={ordered}
+              get={(r) => (r.psiDesktop ? String(r.psiDesktop.performance) : r.psiDesktopError ? 'err' : '...')}
+              highlight={(r) => psiScoreColor(r.psiDesktop?.performance)}
+            />
+            <DataRow label="LCP lab" ordered={ordered} get={(r) => fmtMs(r.psiDesktop?.lcp)} />
+            <DataRow label="CLS lab" ordered={ordered} get={(r) => fmtCls(r.psiDesktop?.cls)} />
+            <DataRow label="TBT lab" ordered={ordered} get={(r) => fmtMsRaw(r.psiDesktop?.tbt)} />
+            <DataRow label="TTFB" ordered={ordered} get={(r) => fmtMsRaw(r.psiDesktop?.ttfb)} />
 
-          <SectionRow label="ON-PAGE SEO" colSpan={ordered.length + 1} />
-          <DataRow label="Status" ordered={ordered} get={(r) => String(r.onpage?.statusCode ?? '-')} />
-          <DataRow
-            label="Title length"
-            ordered={ordered}
-            get={(r) => (r.onpage?.titleLength ? `${r.onpage.titleLength} chars` : 'missing')}
-          />
-          <DataRow
-            label="Meta desc length"
-            ordered={ordered}
-            get={(r) =>
-              r.onpage?.metaDescriptionLength
-                ? `${r.onpage.metaDescriptionLength} chars`
-                : 'missing'
-            }
-          />
-          <DataRow label="Canonical" ordered={ordered} get={(r) => (r.onpage?.canonical ? 'yes' : 'no')} />
-          <DataRow
-            label="H1 count"
-            ordered={ordered}
-            get={(r) => String(r.onpage?.h1Count ?? '-')}
-            highlight={(r) =>
-              r.onpage && r.onpage.h1Count > 1 ? '#fee' : r.onpage?.h1Count === 1 ? null : null
-            }
-          />
-          <DataRow label="H2 count" ordered={ordered} get={(r) => String(r.onpage?.h2Count ?? '-')} />
-          <DataRow
-            label="Img missing alt"
-            ordered={ordered}
-            get={(r) =>
-              r.onpage ? `${r.onpage.imgWithoutAlt} of ${r.onpage.imgCount}` : '-'
-            }
-          />
-          <DataRow
-            label="Open Graph"
-            ordered={ordered}
-            get={(r) => (r.onpage?.openGraph.present ? 'yes' : 'no')}
-          />
-          <DataRow
-            label="og:image"
-            ordered={ordered}
-            get={(r) => {
-              const img = r.onpage?.openGraph.image;
-              if (!img || img === 'false') return 'missing';
-              return 'set';
-            }}
-          />
-          <DataRow
-            label="Twitter Card"
-            ordered={ordered}
-            get={(r) => r.onpage?.twitterCard ?? 'missing'}
-          />
-          <DataRow
-            label="Schema types"
-            ordered={ordered}
-            get={(r) => {
-              if (!r.onpage?.schema.present) return 'none';
-              const types = r.onpage.schema.types;
-              if (types.length === 0) return `${r.onpage.schema.blockCount} block, no types`;
-              return types.join(', ');
-            }}
-          />
-          <DataRow
-            label="Menu page"
-            ordered={ordered}
-            get={(r) => {
-              if (!r.onpage) return '-';
-              if (!r.onpage.menu.detected) return 'not found';
-              return r.onpage.menu.format ?? 'detected';
-            }}
-          />
-          <DataRow label="Word count" ordered={ordered} get={(r) => String(r.onpage?.wordCount ?? '-')} />
-          <DataRow label="HTML size" ordered={ordered} get={(r) => (r.onpage ? `${r.onpage.htmlSizeKb} KB` : '-')} />
-        </tbody>
-      </table>
-    </div>
+            <SectionRow label="ON-PAGE SEO" colSpan={ordered.length + 1} />
+            <DataRow label="Status" ordered={ordered} get={(r) => String(r.onpage?.statusCode ?? '-')} />
+            <DataRow
+              label="Title length"
+              ordered={ordered}
+              get={(r) => (r.onpage?.titleLength ? `${r.onpage.titleLength} chars` : 'missing')}
+            />
+            <DataRow
+              label="Meta desc length"
+              ordered={ordered}
+              get={(r) =>
+                r.onpage?.metaDescriptionLength
+                  ? `${r.onpage.metaDescriptionLength} chars`
+                  : 'missing'
+              }
+            />
+            <DataRow label="Canonical" ordered={ordered} get={(r) => (r.onpage?.canonical ? 'yes' : 'no')} />
+            <DataRow
+              label="H1 count"
+              ordered={ordered}
+              get={(r) => String(r.onpage?.h1Count ?? '-')}
+              highlight={(r) =>
+                r.onpage && r.onpage.h1Count > 1 ? '#fee' : r.onpage?.h1Count === 1 ? null : null
+              }
+            />
+            <DataRow label="H2 count" ordered={ordered} get={(r) => String(r.onpage?.h2Count ?? '-')} />
+            <DataRow
+              label="Img missing alt"
+              ordered={ordered}
+              get={(r) => (r.onpage ? `${r.onpage.imgWithoutAlt} of ${r.onpage.imgCount}` : '-')}
+            />
+            <DataRow
+              label="Open Graph"
+              ordered={ordered}
+              get={(r) => (r.onpage?.openGraph.present ? 'yes' : 'no')}
+            />
+            <DataRow
+              label="og:image"
+              ordered={ordered}
+              get={(r) => {
+                const img = r.onpage?.openGraph.image;
+                if (!img || img === 'false') return 'missing';
+                return 'set';
+              }}
+            />
+            <DataRow
+              label="Twitter Card"
+              ordered={ordered}
+              get={(r) => r.onpage?.twitterCard ?? 'missing'}
+            />
+            <DataRow
+              label="Schema types"
+              ordered={ordered}
+              get={(r) => {
+                if (!r.onpage?.schema.present) return 'none';
+                const types = r.onpage.schema.types;
+                if (types.length === 0) return `${r.onpage.schema.blockCount} block, no types`;
+                return types.join(', ');
+              }}
+            />
+            <DataRow
+              label="Menu page"
+              ordered={ordered}
+              get={(r) => {
+                if (!r.onpage) return '-';
+                if (!r.onpage.menu.detected) return 'not found';
+                return r.onpage.menu.format ?? 'detected';
+              }}
+            />
+            <DataRow label="Word count" ordered={ordered} get={(r) => String(r.onpage?.wordCount ?? '-')} />
+            <DataRow label="HTML size" ordered={ordered} get={(r) => (r.onpage ? `${r.onpage.htmlSizeKb} KB` : '-')} />
+          </tbody>
+        </table>
+      </div>
+    </details>
   );
 }
 
