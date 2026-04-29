@@ -84,6 +84,13 @@ type OnPageData = {
     types: string[];
     present: boolean;
   };
+  menu: {
+    url: string | null;
+    format: string | null;
+    status: number | null;
+    error: string | null;
+    detected: boolean;
+  };
   wordCount: number;
   htmlSizeKb: number;
   elapsed: number;
@@ -508,6 +515,15 @@ function OnPageCard({ result }: { result: OnPageResult }) {
                 : 'missing'}
             </dd>
 
+            <dt style={{ color: '#666' }}>Menu page</dt>
+            <dd style={{ margin: 0 }}>
+              {result.data.menu.detected
+                ? `${result.data.menu.format ?? 'unknown format'}${
+                    result.data.menu.error ? ` (${result.data.menu.error})` : ''
+                  }`
+                : 'no menu link found'}
+            </dd>
+
             <dt style={{ color: '#666' }}>Word count</dt>
             <dd style={{ margin: 0 }}>{result.data.wordCount}</dd>
 
@@ -517,6 +533,20 @@ function OnPageCard({ result }: { result: OnPageResult }) {
             <dt style={{ color: '#666' }}>Wall time</dt>
             <dd style={{ margin: 0, color: '#666' }}>{(result.data.elapsed / 1000).toFixed(1)}s</dd>
           </dl>
+
+          {result.data.menu.detected && result.data.menu.url && (
+            <details style={{ marginTop: 12, fontSize: 13, color: '#444' }}>
+              <summary style={{ cursor: 'pointer', color: '#666' }}>Menu page detail</summary>
+              <dl style={{ margin: '8px 0 0 0', display: 'grid', gridTemplateColumns: 'max-content 1fr', gap: '4px 12px' }}>
+                <dt style={{ color: '#666' }}>URL</dt>
+                <dd style={{ margin: 0, wordBreak: 'break-all' }}>{result.data.menu.url}</dd>
+                <dt style={{ color: '#666' }}>Format</dt>
+                <dd style={{ margin: 0 }}>{result.data.menu.format ?? 'unknown'}</dd>
+                <dt style={{ color: '#666' }}>HTTP status</dt>
+                <dd style={{ margin: 0 }}>{result.data.menu.status ?? 'no response'}</dd>
+              </dl>
+            </details>
+          )}
 
           {result.data.h1Tags.length > 0 && (
             <details style={{ marginTop: 12, fontSize: 13, color: '#444' }}>
