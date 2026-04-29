@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { evaluate, Finding, Restaurant, Severity } from './lib/rules';
 
 const PSI_API_KEY = process.env.NEXT_PUBLIC_GOOGLE_API_KEY;
@@ -61,6 +61,12 @@ type AuditEntry = {
 };
 
 type AuditResponse = {
+  subject?: {
+    placeId: string;
+    location: { latitude: number; longitude: number };
+    primaryType: string | null;
+    competitorQuery: string;
+  };
   discovered: { totalResults: number; afterFiltering: number; taken: number };
   restaurantCount: number;
   results: AuditEntry[];
@@ -80,6 +86,13 @@ type RestaurantState = {
   serverErrors: { places?: string; onpage?: string };
 };
 
+type Suggestion = {
+  placeId: string;
+  text: string;
+  mainText: string;
+  secondaryText: string;
+};
+
 async function runPSI(url: string, strategy: Strategy): Promise<PSIData> {
   const endpoint =
     `https://www.googleapis.com/pagespeedonline/v5/runPagespeed` +
@@ -93,8 +106,8 @@ async function runPSI(url: string, strategy: Strategy): Promise<PSIData> {
     const body = await res.text();
     throw new Error(`PSI ${strategy} ${res.status}: ${body.slice(0, 150)}`);
   }
-  const json = await res.json();
 
+  const json = await res.json();
   const lighthouse = json.lighthouseResult;
   const audits = lighthouse.audits;
   const field = json.loadingExperience?.metrics ?? {};
@@ -119,6 +132,92 @@ export default function Home() {
   const [serverElapsed, setServerElapsed] = useState<number | null>(null);
   const [totalElapsed, setTotalElapsed] = useState<number | null>(null);
 
+  // V1 autocomplete and selection state.
+  const [query, setQuery] = useState('');
+  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+  const [autocompleteError, setAutocompleteError] = useState<string | null>(
+    null
+  );
+  const [selectedPlaceId, setSelectedPlaceId] = useState<string | null>(null);
+  const [selectedName, setSelectedName] = useState<string | null>(null);
+  const [selectedAddress, setSelectedAddress] = useState<string | null>(null);
+  const [categoryQuery, setCategoryQuery] = useState('');
+  const [loadingDetails, setLoadingDetails] = useState(false);
+
+  // Debounced autocomplete fetch. Only runs when no selection is active and
+  // input is at least 2 chars after trim. AbortController cancels stale
+  // in-flight requests so a slow earlier response cannot overwrite a newer one.
+  useEffect(() => {
+    if (selectedPlaceId) return;
+    if (query.trim().length < 2) {
+      setSuggestions([]);
+      return;
+    }
+
+    const controller = new AbortController();
+    const handle = setTimeout(async () => {
+      try {
+        const res = await fetch(
+          `/api/autocomplete?input=${encodeURIComponent(query.trim())}`,
+          { signal: controller.signal }
+        );
+        if (!res.ok) {
+          setAutocompleteError(`autocomplete ${res.status}`);
+          return;
+        }
+        const data = await res.json();
+        setSuggestions(data.suggestions ?? []);
+        setAutocompleteError(null);
+      } catch (e) {
+        if ((e as Error).name === 'AbortError') return;
+        setAutocompleteError((e as Error).message);
+      }
+    }, 300);
+
+    return () => {
+      clearTimeout(handle);
+      controller.abort();
+    };
+  }, [query, selectedPlaceId]);
+
+  async function selectSuggestion(s: Suggestion) {
+    setSelectedPlaceId(s.placeId);
+    setSelectedName(s.mainText);
+    setSelectedAddress(s.secondaryText);
+    setQuery('');
+    setSuggestions([]);
+    setLoadingDetails(true);
+    setCategoryQuery('');
+
+    try {
+      const res = await fetch(
+        `/api/places?placeId=${encodeURIComponent(s.placeId)}`
+      );
+      if (res.ok) {
+        const data: PlacesData = await res.json();
+        const primaryType = data.primaryType ?? 'restaurant';
+        setCategoryQuery(primaryType.replace(/_/g, ' '));
+      }
+    } catch {
+      // leave category blank for manual entry
+    }
+
+    setLoadingDetails(false);
+  }
+
+  function clearSelection() {
+    setSelectedPlaceId(null);
+    setSelectedName(null);
+    setSelectedAddress(null);
+    setCategoryQuery('');
+    setQuery('');
+    setSuggestions([]);
+    setRestaurants([]);
+    setServerError(null);
+    setServerElapsed(null);
+    setTotalElapsed(null);
+  }
+
   // Findings recompute whenever restaurant state changes (PSI calls finishing).
   // We only show findings once all PSI calls have either completed or errored,
   // because some rules depend on competitor PSI scores.
@@ -141,6 +240,11 @@ export default function Home() {
       alert('NEXT_PUBLIC_GOOGLE_API_KEY is missing in Vercel env vars.');
       return;
     }
+    if (!selectedPlaceId) {
+      alert('Select a restaurant first.');
+      return;
+    }
+
     setRunning(true);
     setServerError(null);
     setServerElapsed(null);
@@ -148,10 +252,15 @@ export default function Home() {
     setRestaurants([]);
 
     const startWall = performance.now();
-
     let auditData: AuditResponse;
+
     try {
-      const res = await fetch('/api/audit');
+      const params = new URLSearchParams();
+      params.set('subjectPlaceId', selectedPlaceId);
+      const trimmedCategory = categoryQuery.trim();
+      if (trimmedCategory) params.set('competitorQuery', trimmedCategory);
+
+      const res = await fetch(`/api/audit?${params.toString()}`);
       if (!res.ok) throw new Error(`Audit route returned ${res.status}`);
       auditData = await res.json();
       setServerElapsed(auditData.elapsed);
@@ -174,9 +283,11 @@ export default function Home() {
       psiDesktopError: null,
       serverErrors: r.errors,
     }));
+
     setRestaurants(initial);
 
     const psiJobs: Promise<void>[] = [];
+
     initial.forEach((r, i) => {
       if (!r.website) return;
       const strategies: Strategy[] = ['mobile', 'desktop'];
@@ -193,7 +304,8 @@ export default function Home() {
           .catch((e: Error) =>
             setRestaurants((prev) => {
               const next = [...prev];
-              if (strategy === 'mobile') next[i] = { ...next[i], psiMobileError: e.message };
+              if (strategy === 'mobile')
+                next[i] = { ...next[i], psiMobileError: e.message };
               else next[i] = { ...next[i], psiDesktopError: e.message };
               return next;
             })
@@ -219,19 +331,41 @@ export default function Home() {
     >
       <h1 style={{ fontSize: 22, marginBottom: 8 }}>Restaurant Audit</h1>
       <p style={{ color: '#555', marginTop: 0, marginBottom: 24 }}>
-        Subject vs four nearby competitors. Subject column highlighted.
+        Search for a restaurant, then audit it against four nearby competitors.
       </p>
+
+      {!selectedPlaceId && (
+        <SearchBox
+          query={query}
+          setQuery={setQuery}
+          suggestions={suggestions}
+          onSelect={selectSuggestion}
+          error={autocompleteError}
+        />
+      )}
+
+      {selectedPlaceId && (
+        <SelectionCard
+          name={selectedName}
+          address={selectedAddress}
+          categoryQuery={categoryQuery}
+          setCategoryQuery={setCategoryQuery}
+          loadingDetails={loadingDetails}
+          onChange={clearSelection}
+        />
+      )}
 
       <button
         onClick={runAudit}
-        disabled={running}
+        disabled={running || !selectedPlaceId}
         style={{
           padding: '10px 20px',
           fontSize: 15,
           marginBottom: 20,
-          cursor: running ? 'wait' : 'pointer',
-          background: running ? '#ddd' : '#111',
-          color: running ? '#666' : '#fff',
+          cursor:
+            running ? 'wait' : !selectedPlaceId ? 'not-allowed' : 'pointer',
+          background: running || !selectedPlaceId ? '#ddd' : '#111',
+          color: running || !selectedPlaceId ? '#666' : '#fff',
           border: 'none',
           borderRadius: 6,
         }}
@@ -247,15 +381,210 @@ export default function Home() {
 
       {(serverElapsed !== null || totalElapsed !== null) && (
         <p style={{ color: '#888', fontSize: 12, marginBottom: 20 }}>
-          {serverElapsed !== null && <>Server roundtrip: {(serverElapsed / 1000).toFixed(1)}s. </>}
-          {totalElapsed !== null && <>Total wall time: {(totalElapsed / 1000).toFixed(1)}s.</>}
+          {serverElapsed !== null && (
+            <>Server roundtrip: {(serverElapsed / 1000).toFixed(1)}s. </>
+          )}
+          {totalElapsed !== null && (
+            <>Total wall time: {(totalElapsed / 1000).toFixed(1)}s.</>
+          )}
         </p>
       )}
 
       {findings.length > 0 && <FindingsSection findings={findings} />}
-
       {restaurants.length > 0 && <ComparisonTable restaurants={restaurants} />}
     </main>
+  );
+}
+
+function SearchBox({
+  query,
+  setQuery,
+  suggestions,
+  onSelect,
+  error,
+}: {
+  query: string;
+  setQuery: (s: string) => void;
+  suggestions: Suggestion[];
+  onSelect: (s: Suggestion) => void;
+  error: string | null;
+}) {
+  return (
+    <div style={{ marginBottom: 16, position: 'relative', maxWidth: 600 }}>
+      <label
+        style={{
+          display: 'block',
+          fontSize: 12,
+          color: '#555',
+          marginBottom: 6,
+        }}
+      >
+        Restaurant name
+      </label>
+      <input
+        type="text"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="Type at least 2 characters..."
+        style={{
+          width: '100%',
+          padding: '10px 12px',
+          fontSize: 14,
+          border: '1px solid #ccc',
+          borderRadius: 6,
+          fontFamily: 'inherit',
+          boxSizing: 'border-box',
+        }}
+      />
+      {error && (
+        <p style={{ color: '#b00020', fontSize: 12, marginTop: 4 }}>
+          Autocomplete error: {error}
+        </p>
+      )}
+      {suggestions.length > 0 && (
+        <ul
+          style={{
+            position: 'absolute',
+            top: '100%',
+            left: 0,
+            right: 0,
+            margin: '4px 0 0 0',
+            padding: 0,
+            listStyle: 'none',
+            background: '#fff',
+            border: '1px solid #ccc',
+            borderRadius: 6,
+            maxHeight: 320,
+            overflowY: 'auto',
+            zIndex: 10,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
+          }}
+        >
+          {suggestions.map((s) => (
+            <li
+              key={s.placeId}
+              onClick={() => onSelect(s)}
+              style={{
+                padding: '10px 12px',
+                cursor: 'pointer',
+                borderBottom: '1px solid #f0f0f0',
+              }}
+              onMouseEnter={(e) =>
+                ((e.currentTarget as HTMLLIElement).style.background = '#f5f5f5')
+              }
+              onMouseLeave={(e) =>
+                ((e.currentTarget as HTMLLIElement).style.background = '#fff')
+              }
+            >
+              <div style={{ fontSize: 14, fontWeight: 500 }}>{s.mainText}</div>
+              <div style={{ fontSize: 12, color: '#888' }}>
+                {s.secondaryText}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function SelectionCard({
+  name,
+  address,
+  categoryQuery,
+  setCategoryQuery,
+  loadingDetails,
+  onChange,
+}: {
+  name: string | null;
+  address: string | null;
+  categoryQuery: string;
+  setCategoryQuery: (s: string) => void;
+  loadingDetails: boolean;
+  onChange: () => void;
+}) {
+  return (
+    <div
+      style={{
+        marginBottom: 16,
+        padding: 16,
+        background: '#f5faff',
+        border: '1px solid #d0e3ff',
+        borderRadius: 6,
+        maxWidth: 600,
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'flex-start',
+          gap: 12,
+        }}
+      >
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 600 }}>{name}</div>
+          {address && (
+            <div style={{ fontSize: 12, color: '#666', marginTop: 2 }}>
+              {address}
+            </div>
+          )}
+        </div>
+        <button
+          onClick={onChange}
+          style={{
+            padding: '4px 10px',
+            fontSize: 12,
+            background: '#fff',
+            border: '1px solid #ccc',
+            borderRadius: 4,
+            cursor: 'pointer',
+            color: '#444',
+          }}
+        >
+          Change
+        </button>
+      </div>
+
+      <label
+        style={{
+          display: 'block',
+          fontSize: 12,
+          color: '#555',
+          marginTop: 14,
+          marginBottom: 6,
+        }}
+      >
+        Competitor category{' '}
+        {loadingDetails && (
+          <span style={{ color: '#888' }}>(loading...)</span>
+        )}
+      </label>
+      <input
+        type="text"
+        value={categoryQuery}
+        onChange={(e) => setCategoryQuery(e.target.value)}
+        placeholder="e.g. sports bar, taqueria, pizza"
+        style={{
+          width: '100%',
+          padding: '8px 10px',
+          fontSize: 13,
+          border: '1px solid #ccc',
+          borderRadius: 4,
+          fontFamily: 'inherit',
+          boxSizing: 'border-box',
+        }}
+      />
+      <p
+        style={{
+          fontSize: 11,
+          color: '#888',
+          margin: '4px 0 0 0',
+        }}
+      >
+        Auto-detected from Google. Edit if it is wrong.
+      </p>
+    </div>
   );
 }
 
@@ -269,20 +598,44 @@ function FindingsSection({ findings }: { findings: Finding[] }) {
   return (
     <section style={{ marginBottom: 32 }}>
       <h2 style={{ fontSize: 16, marginTop: 0, marginBottom: 12 }}>
-        Findings <span style={{ color: '#888', fontWeight: 400 }}>({findings.length})</span>
+        Findings{' '}
+        <span style={{ color: '#888', fontWeight: 400 }}>
+          ({findings.length})
+        </span>
       </h2>
-      <p style={{ color: '#888', fontSize: 12, marginTop: 0, marginBottom: 16 }}>
-        Subject restaurant only. Detailed metrics for all five restaurants in the comparison table below.
+      <p
+        style={{
+          color: '#888',
+          fontSize: 12,
+          marginTop: 0,
+          marginBottom: 16,
+        }}
+      >
+        Subject restaurant only. Detailed metrics for all five restaurants in
+        the comparison table below.
       </p>
-
-      {grouped.critical.length > 0 && <FindingGroup title="Critical" findings={grouped.critical} color="#b00020" />}
-      {grouped.warning.length > 0 && <FindingGroup title="Warning" findings={grouped.warning} color="#a06800" />}
-      {grouped.note.length > 0 && <FindingGroup title="Note" findings={grouped.note} color="#666" />}
+      {grouped.critical.length > 0 && (
+        <FindingGroup title="Critical" findings={grouped.critical} color="#b00020" />
+      )}
+      {grouped.warning.length > 0 && (
+        <FindingGroup title="Warning" findings={grouped.warning} color="#a06800" />
+      )}
+      {grouped.note.length > 0 && (
+        <FindingGroup title="Note" findings={grouped.note} color="#666" />
+      )}
     </section>
   );
 }
 
-function FindingGroup({ title, findings, color }: { title: string; findings: Finding[]; color: string }) {
+function FindingGroup({
+  title,
+  findings,
+  color,
+}: {
+  title: string;
+  findings: Finding[];
+  color: string;
+}) {
   return (
     <div style={{ marginBottom: 16 }}>
       <h3
@@ -310,13 +663,36 @@ function FindingGroup({ title, findings, color }: { title: string; findings: Fin
               borderRadius: '0 4px 4px 0',
             }}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'baseline',
+                gap: 12,
+              }}
+            >
               <span style={{ fontSize: 14, fontWeight: 600 }}>{f.title}</span>
-              <span style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+              <span
+                style={{
+                  fontSize: 11,
+                  color: '#888',
+                  textTransform: 'uppercase',
+                  letterSpacing: 0.5,
+                }}
+              >
                 {f.category}
               </span>
             </div>
-            <p style={{ margin: '4px 0 0 0', fontSize: 13, color: '#444', lineHeight: 1.5 }}>{f.detail}</p>
+            <p
+              style={{
+                margin: '4px 0 0 0',
+                fontSize: 13,
+                color: '#444',
+                lineHeight: 1.5,
+              }}
+            >
+              {f.detail}
+            </p>
           </li>
         ))}
       </ul>
@@ -332,7 +708,14 @@ function ComparisonTable({ restaurants }: { restaurants: RestaurantState[] }) {
 
   return (
     <details style={{ marginTop: 24 }}>
-      <summary style={{ cursor: 'pointer', fontSize: 14, color: '#555', marginBottom: 12 }}>
+      <summary
+        style={{
+          cursor: 'pointer',
+          fontSize: 14,
+          color: '#555',
+          marginBottom: 12,
+        }}
+      >
         Detailed comparison data (all five restaurants)
       </summary>
       <div style={{ overflowX: 'auto', marginTop: 12 }}>
@@ -351,10 +734,25 @@ function ComparisonTable({ restaurants }: { restaurants: RestaurantState[] }) {
                 <th key={i} style={headerCellStyle(r.isSubject ? 'subject' : 'comp')}>
                   <div style={{ fontWeight: 600 }}>{r.name}</div>
                   {r.isSubject && (
-                    <div style={{ fontSize: 11, color: '#0066cc', fontWeight: 500 }}>SUBJECT</div>
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: '#0066cc',
+                        fontWeight: 500,
+                      }}
+                    >
+                      SUBJECT
+                    </div>
                   )}
                   {r.places?.address && (
-                    <div style={{ fontSize: 11, color: '#888', fontWeight: 400, marginTop: 2 }}>
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: '#888',
+                        fontWeight: 400,
+                        marginTop: 2,
+                      }}
+                    >
                       {r.places.address.split(',').slice(0, 2).join(',')}
                     </div>
                   )}
@@ -370,8 +768,7 @@ function ComparisonTable({ restaurants }: { restaurants: RestaurantState[] }) {
             <DataRow label="Photos (capped)" ordered={ordered} get={(r) => String(r.places?.photoCount ?? '-')} />
             <DataRow label="Hours present" ordered={ordered} get={(r) => (r.places?.hoursPresent ? 'yes' : 'no')} />
             <DataRow label="Primary type" ordered={ordered} get={(r) => r.places?.primaryType ?? '-'} />
-
-            <SectionRow label="PAGESPEED — MOBILE" colSpan={ordered.length + 1} />
+            <SectionRow label="PAGESPEED - MOBILE" colSpan={ordered.length + 1} />
             <DataRow
               label="Performance score"
               ordered={ordered}
@@ -383,8 +780,7 @@ function ComparisonTable({ restaurants }: { restaurants: RestaurantState[] }) {
             <DataRow label="CLS lab" ordered={ordered} get={(r) => fmtCls(r.psiMobile?.cls)} />
             <DataRow label="TBT lab" ordered={ordered} get={(r) => fmtMsRaw(r.psiMobile?.tbt)} />
             <DataRow label="TTFB" ordered={ordered} get={(r) => fmtMsRaw(r.psiMobile?.ttfb)} />
-
-            <SectionRow label="PAGESPEED — DESKTOP" colSpan={ordered.length + 1} />
+            <SectionRow label="PAGESPEED - DESKTOP" colSpan={ordered.length + 1} />
             <DataRow
               label="Performance score"
               ordered={ordered}
@@ -395,7 +791,6 @@ function ComparisonTable({ restaurants }: { restaurants: RestaurantState[] }) {
             <DataRow label="CLS lab" ordered={ordered} get={(r) => fmtCls(r.psiDesktop?.cls)} />
             <DataRow label="TBT lab" ordered={ordered} get={(r) => fmtMsRaw(r.psiDesktop?.tbt)} />
             <DataRow label="TTFB" ordered={ordered} get={(r) => fmtMsRaw(r.psiDesktop?.ttfb)} />
-
             <SectionRow label="ON-PAGE SEO" colSpan={ordered.length + 1} />
             <DataRow label="Status" ordered={ordered} get={(r) => String(r.onpage?.statusCode ?? '-')} />
             <DataRow
