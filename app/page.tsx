@@ -52,6 +52,49 @@ type PlacesResult = {
   data: PlacesData | null;
 };
 
+type OnPageData = {
+  url: string;
+  finalUrl: string;
+  statusCode: number;
+  title: string | null;
+  titleLength: number;
+  metaDescription: string | null;
+  metaDescriptionLength: number;
+  canonical: string | null;
+  viewport: string | null;
+  robots: string | null;
+  lang: string | null;
+  h1Tags: string[];
+  h1Count: number;
+  h2Count: number;
+  h3Count: number;
+  imgCount: number;
+  imgWithAlt: number;
+  imgWithoutAlt: number;
+  openGraph: {
+    title: string | null;
+    description: string | null;
+    image: string | null;
+    type: string | null;
+    present: boolean;
+  };
+  twitterCard: string | null;
+  schema: {
+    blockCount: number;
+    types: string[];
+    present: boolean;
+  };
+  wordCount: number;
+  htmlSizeKb: number;
+  elapsed: number;
+};
+
+type OnPageResult = {
+  loading: boolean;
+  error: string | null;
+  data: OnPageData | null;
+};
+
 const initialPSI = (strategy: Strategy): PSIResult => ({
   strategy,
   loading: false,
@@ -60,6 +103,12 @@ const initialPSI = (strategy: Strategy): PSIResult => ({
 });
 
 const initialPlaces: PlacesResult = {
+  loading: false,
+  error: null,
+  data: null,
+};
+
+const initialOnPage: OnPageResult = {
   loading: false,
   error: null,
   data: null,
@@ -109,10 +158,20 @@ async function runPlaces(): Promise<PlacesData> {
   return res.json();
 }
 
+async function runOnPage(): Promise<OnPageData> {
+  const res = await fetch('/api/onpage');
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`OnPage returned ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
 export default function Home() {
   const [mobile, setMobile] = useState<PSIResult>(initialPSI('mobile'));
   const [desktop, setDesktop] = useState<PSIResult>(initialPSI('desktop'));
   const [places, setPlaces] = useState<PlacesResult>(initialPlaces);
+  const [onpage, setOnpage] = useState<OnPageResult>(initialOnPage);
   const [running, setRunning] = useState(false);
 
   async function runAudit() {
@@ -124,6 +183,7 @@ export default function Home() {
     setMobile({ ...initialPSI('mobile'), loading: true });
     setDesktop({ ...initialPSI('desktop'), loading: true });
     setPlaces({ ...initialPlaces, loading: true });
+    setOnpage({ ...initialOnPage, loading: true });
 
     const mobileJob = runPSI(TEST_URL, 'mobile')
       .then((d) => setMobile({ strategy: 'mobile', loading: false, error: null, data: d }))
@@ -137,7 +197,11 @@ export default function Home() {
       .then((d) => setPlaces({ loading: false, error: null, data: d }))
       .catch((e: Error) => setPlaces({ loading: false, error: e.message, data: null }));
 
-    await Promise.all([mobileJob, desktopJob, placesJob]);
+    const onpageJob = runOnPage()
+      .then((d) => setOnpage({ loading: false, error: null, data: d }))
+      .catch((e: Error) => setOnpage({ loading: false, error: e.message, data: null }));
+
+    await Promise.all([mobileJob, desktopJob, placesJob, onpageJob]);
     setRunning(false);
   }
 
@@ -171,17 +235,33 @@ export default function Home() {
         {running ? 'Running...' : 'Run Audit'}
       </button>
 
-      <h2 style={{ fontSize: 14, color: '#666', textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 24, marginBottom: 12 }}>
-        PageSpeed
-      </h2>
+      <SectionHeading>PageSpeed</SectionHeading>
       <PSICard result={mobile} />
       <PSICard result={desktop} />
 
-      <h2 style={{ fontSize: 14, color: '#666', textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 32, marginBottom: 12 }}>
-        Google Places
-      </h2>
+      <SectionHeading>Google Places</SectionHeading>
       <PlacesCard result={places} />
+
+      <SectionHeading>On-Page SEO</SectionHeading>
+      <OnPageCard result={onpage} />
     </main>
+  );
+}
+
+function SectionHeading({ children }: { children: React.ReactNode }) {
+  return (
+    <h2
+      style={{
+        fontSize: 14,
+        color: '#666',
+        textTransform: 'uppercase',
+        letterSpacing: 0.5,
+        marginTop: 32,
+        marginBottom: 12,
+      }}
+    >
+      {children}
+    </h2>
   );
 }
 
@@ -329,6 +409,139 @@ function PlacesCard({ result }: { result: PlacesResult }) {
                   <li key={i}>{line}</li>
                 ))}
               </ul>
+            </details>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+function OnPageCard({ result }: { result: OnPageResult }) {
+  return (
+    <section
+      style={{
+        border: '1px solid #ddd',
+        borderRadius: 8,
+        padding: '16px 20px',
+        marginBottom: 16,
+      }}
+    >
+      {result.loading && <p style={{ color: '#666', margin: 0 }}>Fetching and parsing page HTML...</p>}
+      {result.error && (
+        <p style={{ color: '#b00020', margin: 0, fontFamily: 'monospace', fontSize: 13 }}>
+          Error: {result.error}
+        </p>
+      )}
+      {result.data && (
+        <>
+          <dl
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'max-content 1fr',
+              gap: '6px 24px',
+              margin: 0,
+              fontSize: 14,
+            }}
+          >
+            <dt style={{ color: '#666' }}>Status code</dt>
+            <dd style={{ margin: 0 }}>{result.data.statusCode}</dd>
+
+            <dt style={{ color: '#666' }}>Title</dt>
+            <dd style={{ margin: 0 }}>
+              {result.data.title ?? 'missing'}
+              {result.data.title && (
+                <span style={{ color: '#888', fontSize: 12 }}> ({result.data.titleLength} chars)</span>
+              )}
+            </dd>
+
+            <dt style={{ color: '#666' }}>Meta description</dt>
+            <dd style={{ margin: 0 }}>
+              {result.data.metaDescription ?? 'missing'}
+              {result.data.metaDescription && (
+                <span style={{ color: '#888', fontSize: 12 }}> ({result.data.metaDescriptionLength} chars)</span>
+              )}
+            </dd>
+
+            <dt style={{ color: '#666' }}>Canonical URL</dt>
+            <dd style={{ margin: 0, wordBreak: 'break-all' }}>{result.data.canonical ?? 'missing'}</dd>
+
+            <dt style={{ color: '#666' }}>Viewport</dt>
+            <dd style={{ margin: 0 }}>{result.data.viewport ?? 'missing'}</dd>
+
+            <dt style={{ color: '#666' }}>Robots</dt>
+            <dd style={{ margin: 0 }}>{result.data.robots ?? 'not set (defaults to indexable)'}</dd>
+
+            <dt style={{ color: '#666' }}>Lang attribute</dt>
+            <dd style={{ margin: 0 }}>{result.data.lang ?? 'missing'}</dd>
+
+            <dt style={{ color: '#666' }}>H1 count</dt>
+            <dd style={{ margin: 0 }}>
+              {result.data.h1Count}
+              {result.data.h1Count > 1 && (
+                <span style={{ color: '#b00020', fontSize: 12 }}> (multiple H1s)</span>
+              )}
+            </dd>
+
+            <dt style={{ color: '#666' }}>H2 / H3 counts</dt>
+            <dd style={{ margin: 0 }}>
+              {result.data.h2Count} / {result.data.h3Count}
+            </dd>
+
+            <dt style={{ color: '#666' }}>Images</dt>
+            <dd style={{ margin: 0 }}>
+              {result.data.imgCount} total, {result.data.imgWithoutAlt} missing alt text
+            </dd>
+
+            <dt style={{ color: '#666' }}>Open Graph</dt>
+            <dd style={{ margin: 0 }}>
+              {result.data.openGraph.present ? 'present' : 'missing'}
+            </dd>
+
+            <dt style={{ color: '#666' }}>Twitter Card</dt>
+            <dd style={{ margin: 0 }}>{result.data.twitterCard ?? 'missing'}</dd>
+
+            <dt style={{ color: '#666' }}>Schema.org</dt>
+            <dd style={{ margin: 0 }}>
+              {result.data.schema.present
+                ? `${result.data.schema.blockCount} block(s): ${result.data.schema.types.join(', ') || 'no types'}`
+                : 'missing'}
+            </dd>
+
+            <dt style={{ color: '#666' }}>Word count</dt>
+            <dd style={{ margin: 0 }}>{result.data.wordCount}</dd>
+
+            <dt style={{ color: '#666' }}>HTML size</dt>
+            <dd style={{ margin: 0 }}>{result.data.htmlSizeKb} KB</dd>
+
+            <dt style={{ color: '#666' }}>Wall time</dt>
+            <dd style={{ margin: 0, color: '#666' }}>{(result.data.elapsed / 1000).toFixed(1)}s</dd>
+          </dl>
+
+          {result.data.h1Tags.length > 0 && (
+            <details style={{ marginTop: 12, fontSize: 13, color: '#444' }}>
+              <summary style={{ cursor: 'pointer', color: '#666' }}>H1 detail</summary>
+              <ul style={{ margin: '8px 0 0 0', paddingLeft: 20 }}>
+                {result.data.h1Tags.map((tag, i) => (
+                  <li key={i}>{tag}</li>
+                ))}
+              </ul>
+            </details>
+          )}
+
+          {result.data.openGraph.present && (
+            <details style={{ marginTop: 12, fontSize: 13, color: '#444' }}>
+              <summary style={{ cursor: 'pointer', color: '#666' }}>Open Graph detail</summary>
+              <dl style={{ margin: '8px 0 0 0', display: 'grid', gridTemplateColumns: 'max-content 1fr', gap: '4px 12px' }}>
+                <dt style={{ color: '#666' }}>og:title</dt>
+                <dd style={{ margin: 0 }}>{result.data.openGraph.title ?? '-'}</dd>
+                <dt style={{ color: '#666' }}>og:description</dt>
+                <dd style={{ margin: 0 }}>{result.data.openGraph.description ?? '-'}</dd>
+                <dt style={{ color: '#666' }}>og:image</dt>
+                <dd style={{ margin: 0, wordBreak: 'break-all' }}>{result.data.openGraph.image ?? '-'}</dd>
+                <dt style={{ color: '#666' }}>og:type</dt>
+                <dd style={{ margin: 0 }}>{result.data.openGraph.type ?? '-'}</dd>
+              </dl>
             </details>
           )}
         </>
