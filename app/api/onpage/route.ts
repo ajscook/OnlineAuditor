@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import * as cheerio from 'cheerio';
 
-const TARGET_URL = 'https://gatorskent.com/';
+const DEFAULT_TARGET_URL = 'https://gatorskent.com/';
 
 const USER_AGENT =
   'Mozilla/5.0 (compatible; RestaurantAuditBot/1.0; +https://online-auditor.vercel.app)';
@@ -16,8 +16,6 @@ async function fetchHtml(url: string): Promise<{ html: string; status: number; f
 }
 
 function findMenuLink($: cheerio.CheerioAPI, baseUrl: string): string | null {
-  // Look for any anchor tag whose text or href contains "menu".
-  // Prefer text matches in nav-style elements (header, nav, .menu).
   const candidates: string[] = [];
 
   $('a').each((_, el) => {
@@ -26,12 +24,9 @@ function findMenuLink($: cheerio.CheerioAPI, baseUrl: string): string | null {
     const text = $(el).text().trim().toLowerCase();
     const hrefLower = href.toLowerCase();
 
-    // Skip mailto, tel, javascript links
     if (hrefLower.startsWith('mailto:') || hrefLower.startsWith('tel:') || hrefLower.startsWith('javascript:')) {
       return;
     }
-
-    // Skip anchors that just point to a fragment on the same page
     if (hrefLower.startsWith('#')) return;
 
     if (text === 'menu' || text === 'menus' || text.includes('menu') || hrefLower.includes('menu')) {
@@ -41,7 +36,6 @@ function findMenuLink($: cheerio.CheerioAPI, baseUrl: string): string | null {
 
   if (candidates.length === 0) return null;
 
-  // Resolve to absolute URL
   try {
     return new URL(candidates[0], baseUrl).href;
   } catch {
@@ -59,7 +53,6 @@ function detectMenuFormat(menuUrl: string, contentType: string | null, html: str
   if (ct.includes('text/html') || ct === '') {
     const $ = cheerio.load(html);
     if ($('iframe').length > 0) return 'html-with-iframe';
-    // Heuristic: if the page has lots of img tags but few text-heavy elements, the menu may be image-based
     const imgCount = $('img').length;
     const textBlocks = $('p, li, td').length;
     if (imgCount > 0 && textBlocks < 10) return 'image-heavy-html';
@@ -69,7 +62,11 @@ function detectMenuFormat(menuUrl: string, contentType: string | null, html: str
   return 'unknown';
 }
 
-export async function GET() {
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const urlParam = searchParams.get('url');
+  const targetUrl = urlParam ?? DEFAULT_TARGET_URL;
+
   const start = Date.now();
 
   let html: string;
@@ -77,7 +74,7 @@ export async function GET() {
   let finalUrl: string;
 
   try {
-    const result = await fetchHtml(TARGET_URL);
+    const result = await fetchHtml(targetUrl);
     html = result.html;
     statusCode = result.status;
     finalUrl = result.finalUrl;
@@ -133,7 +130,6 @@ export async function GET() {
       const parsed = JSON.parse(script);
       const items = Array.isArray(parsed) ? parsed : [parsed];
       for (const item of items) {
-        // Handle @graph wrapper (common in Yoast/WordPress)
         if (item['@graph'] && Array.isArray(item['@graph'])) {
           for (const node of item['@graph']) {
             const type = node['@type'];
@@ -153,7 +149,6 @@ export async function GET() {
   const wordCount = $('body').text().trim().split(/\s+/).filter(Boolean).length;
   const htmlSizeKb = Math.round(html.length / 1024);
 
-  // Menu detection: look for a link, follow it, classify the format.
   const menuUrl = findMenuLink($, finalUrl);
   let menuFormat: string | null = null;
   let menuStatus: number | null = null;
@@ -169,7 +164,6 @@ export async function GET() {
       const contentType = res.headers.get('content-type');
 
       if (res.ok) {
-        // Only read body if we need to inspect HTML structure
         const ct = (contentType ?? '').toLowerCase();
         if (ct.includes('text/html') || ct === '') {
           const menuHtml = await res.text();
@@ -189,7 +183,7 @@ export async function GET() {
   const elapsed = Date.now() - start;
 
   return NextResponse.json({
-    url: TARGET_URL,
+    url: targetUrl,
     finalUrl,
     statusCode,
     title,
