@@ -1,41 +1,51 @@
 import { NextResponse } from 'next/server';
 
-const GATORS_PLACE_ID = 'ChIJN1t_tDeuEmsRUsoyG83frY4';
+const DEFAULT_QUERY = 'Gators Sports Bar and Grill Kent WA';
 
-export async function GET() {
+export async function GET(request: Request) {
   const apiKey = process.env.GOOGLE_API_KEY;
   if (!apiKey) {
     return NextResponse.json({ error: 'GOOGLE_API_KEY env var is missing' }, { status: 500 });
   }
 
+  const { searchParams } = new URL(request.url);
+  const placeIdParam = searchParams.get('placeId');
+  const queryParam = searchParams.get('query');
+
   const start = Date.now();
+  let placeId: string | null = placeIdParam;
 
-  let placeId = GATORS_PLACE_ID;
+  // If no placeId given, resolve one via text search.
+  if (!placeId) {
+    const textQuery = queryParam ?? DEFAULT_QUERY;
+    const findUrl = `https://places.googleapis.com/v1/places:searchText`;
+    const findRes = await fetch(findUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': apiKey,
+        'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress',
+      },
+      body: JSON.stringify({ textQuery }),
+    });
 
-  const findUrl = `https://places.googleapis.com/v1/places:searchText`;
-  const findRes = await fetch(findUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Goog-Api-Key': apiKey,
-      'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress',
-    },
-    body: JSON.stringify({
-      textQuery: 'Gators Sports Bar and Grill Kent WA',
-    }),
-  });
+    if (!findRes.ok) {
+      const body = await findRes.text();
+      return NextResponse.json(
+        { error: `Places search failed: ${findRes.status}`, detail: body.slice(0, 500) },
+        { status: 500 }
+      );
+    }
 
-  if (!findRes.ok) {
-    const body = await findRes.text();
-    return NextResponse.json(
-      { error: `Places search failed: ${findRes.status}`, detail: body.slice(0, 500) },
-      { status: 500 }
-    );
-  }
-
-  const findJson = await findRes.json();
-  if (findJson.places && findJson.places.length > 0) {
-    placeId = findJson.places[0].id;
+    const findJson = await findRes.json();
+    if (findJson.places && findJson.places.length > 0) {
+      placeId = findJson.places[0].id;
+    } else {
+      return NextResponse.json(
+        { error: `No places found for query: ${textQuery}` },
+        { status: 404 }
+      );
+    }
   }
 
   const detailsUrl = `https://places.googleapis.com/v1/places/${placeId}`;
