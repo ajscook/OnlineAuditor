@@ -143,6 +143,8 @@ export default function Home() {
   const [serverError, setServerError] = useState<string | null>(null);
   const [serverElapsed, setServerElapsed] = useState<number | null>(null);
   const [totalElapsed, setTotalElapsed] = useState<number | null>(null);
+  const [psiCompleted, setPsiCompleted] = useState(0);
+  const [psiTotal, setPsiTotal] = useState(0);
 
   // V1 autocomplete and selection state.
   const [query, setQuery] = useState('');
@@ -313,6 +315,9 @@ export default function Home() {
     setRestaurants(initial);
 
     const psiJobs: Promise<void>[] = [];
+    const totalJobs = initial.filter((r) => r.website).length * 2;
+    setPsiTotal(totalJobs);
+    setPsiCompleted(0);
 
     initial.forEach((r, i) => {
       if (!r.website) return;
@@ -335,7 +340,10 @@ export default function Home() {
               else next[i] = { ...next[i], psiDesktopError: e.message };
               return next;
             })
-          );
+          )
+          .finally(() => {
+            setPsiCompleted((n) => n + 1);
+          });
         psiJobs.push(job);
       });
     });
@@ -398,6 +406,43 @@ export default function Home() {
       >
         {running ? 'Running...' : 'Run Audit'}
       </button>
+
+      {running && psiTotal > 0 && (
+        <div style={{ marginBottom: 20, maxWidth: 600 }}>
+          <div
+            style={{
+              fontSize: 12,
+              color: '#555',
+              marginBottom: 6,
+              display: 'flex',
+              justifyContent: 'space-between',
+            }}
+          >
+            <span>Running PageSpeed tests...</span>
+            <span>
+              {psiCompleted} of {psiTotal} complete
+            </span>
+          </div>
+          <div
+            style={{
+              width: '100%',
+              height: 6,
+              background: '#eee',
+              borderRadius: 3,
+              overflow: 'hidden',
+            }}
+          >
+            <div
+              style={{
+                width: `${(psiCompleted / psiTotal) * 100}%`,
+                height: '100%',
+                background: '#0066cc',
+                transition: 'width 0.3s ease',
+              }}
+            />
+          </div>
+        </div>
+      )}
 
       {serverError && (
         <p style={{ color: '#b00020', fontFamily: 'monospace', fontSize: 13 }}>
