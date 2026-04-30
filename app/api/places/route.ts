@@ -11,11 +11,12 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const placeIdParam = searchParams.get('placeId');
   const queryParam = searchParams.get('query');
+  const sessionToken = searchParams.get('sessionToken');
 
   const start = Date.now();
+
   let placeId: string | null = placeIdParam;
 
-  // If no placeId given, resolve one via text search.
   if (!placeId) {
     const textQuery = queryParam ?? DEFAULT_QUERY;
     const findUrl = `https://places.googleapis.com/v1/places:searchText`;
@@ -48,7 +49,11 @@ export async function GET(request: Request) {
     }
   }
 
-  const detailsUrl = `https://places.googleapis.com/v1/places/${placeId}`;
+  let detailsUrl = `https://places.googleapis.com/v1/places/${placeId}`;
+  if (sessionToken) {
+    detailsUrl += `?sessionToken=${encodeURIComponent(sessionToken)}`;
+  }
+
   const detailsRes = await fetch(detailsUrl, {
     method: 'GET',
     headers: {
