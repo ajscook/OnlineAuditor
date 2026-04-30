@@ -1,16 +1,18 @@
-// Rules engine for restaurant digital audit findings.
-// Reads the structured audit data and returns a list of findings.
-// No LLM calls. Deterministic. Tune the thresholds in one place.
+// Diagnostic rules engine. Reads the structured audit data and produces
+// findings with severity, category, title, and explanatory detail.
+//
+// Single-subject mode: this engine evaluates one restaurant at a time. The
+// Restaurant.isSubject field is preserved on the type for forward
+// compatibility but is not consulted by any current rule.
 
 export type Severity = 'critical' | 'warning' | 'note';
-export type Category = 'Performance' | 'SEO' | 'Listing' | 'Social';
 
 export type Finding = {
   ruleId: string;
-  category: Category;
   severity: Severity;
   title: string;
   detail: string;
+  category: 'SEO' | 'Performance' | 'Listing' | 'Reputation';
 };
 
 type PSI = {
@@ -28,8 +30,9 @@ type PSI = {
 type Places = {
   rating: number | null;
   reviewCount: number | null;
-  priceLevel: string | null;
   hoursPresent: boolean;
+  photoCount: number;
+  businessStatus: string | null;
   primaryType: string | null;
 };
 
@@ -41,12 +44,15 @@ type OnPage = {
   metaDescriptionLength: number;
   canonical: string | null;
   h1Count: number;
+  h2Count: number;
   imgCount: number;
   imgWithoutAlt: number;
   openGraph: { present: boolean; image: string | null };
-  schema: { present: boolean; types: string[] };
+  twitterCard: string | null;
+  schema: { present: boolean; blockCount: number; types: string[] };
   menu: { detected: boolean; format: string | null };
   wordCount: number;
+  htmlSizeKb: number;
 };
 
 export type Restaurant = {
@@ -58,348 +64,294 @@ export type Restaurant = {
   psiDesktop: PSI | null;
 };
 
-// Helpers for ordinal phrasing on ranked rules.
-function ordinal(n: number): string {
-  const map = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh'];
-  return map[n - 1] ?? `${n}th`;
-}
-
-// Rank: 1 = best, returns subject's place in ordered list (descending = higher better).
-function rankDesc(values: number[], subjectValue: number): number {
-  const sorted = [...values].sort((a, b) => b - a);
-  return sorted.indexOf(subjectValue) + 1;
-}
-
-// Rank: 1 = best, returns subject's place in ordered list (ascending = lower better).
-function rankAsc(values: number[], subjectValue: number): number {
-  const sorted = [...values].sort((a, b) => a - b);
-  return sorted.indexOf(subjectValue) + 1;
-}
-
-function ogImageIsValid(image: string | null): boolean {
-  if (!image) return false;
-  if (image === 'false') return false; // Twin Peaks edge case
-  return true;
-}
-
-function hasLocalBusinessSchema(types: string[]): boolean {
-  return types.some((t) => t === 'LocalBusiness' || t === 'Restaurant' || t === 'BarOrPub' || t === 'FoodEstablishment');
-}
-
 export function evaluate(restaurants: Restaurant[]): Finding[] {
-  const subject = restaurants.find((r) => r.isSubject);
-  const competitors = restaurants.filter((r) => !r.isSubject);
+  // Single-subject mode: evaluate the first restaurant in the array.
+  const subject = restaurants[0];
   if (!subject) return [];
 
   const findings: Finding[] = [];
-  const total = restaurants.length;
 
-  // ============ PERFORMANCE ============
-
-  // Rule: mobile field LCP poor (Google threshold: 4s)
-  if (subject.psiMobile?.fieldLcp !== null && subject.psiMobile?.fieldLcp !== undefined) {
-    const lcpSec = subject.psiMobile.fieldLcp / 1000;
-    if (lcpSec >= 4) {
-      findings.push({
-        ruleId: 'mobile-field-lcp-poor',
-        category: 'Performance',
-        severity: 'critical',
-        title: 'Mobile load time is poor for real users',
-        detail: `Real Chrome users experience a mobile LCP (Largest Contentful Paint) of ${lcpSec.toFixed(2)}s on this site. Google's "poor" threshold is 4s. This is field data from real visits over the last 28 days, not a synthetic test.`,
-      });
-    } else if (lcpSec >= 2.5) {
-      findings.push({
-        ruleId: 'mobile-field-lcp-needs-improvement',
-        category: 'Performance',
-        severity: 'warning',
-        title: 'Mobile load time needs improvement for real users',
-        detail: `Real Chrome users experience a mobile LCP of ${lcpSec.toFixed(2)}s. Google considers under 2.5s "good" and 2.5-4s "needs improvement".`,
-      });
-    }
+  if (subject.psiMobile && subject.psiDesktop) {
+    findings.push(...psiRules(subject.psiMobile, subject.psiDesktop));
+  }
+  if (subject.places) {
+    findings.push(...placesRules(subject.places));
+  }
+  if (subject.onpage) {
+    findings.push(...onPageRules(subject.onpage));
   }
 
-  // Rule: lab-vs-field gap (caching masking real performance)
-  const mobileLab = subject.psiMobile?.lcp;
-  const mobileField = subject.psiMobile?.fieldLcp;
-  if (mobileLab !== undefined && mobileField !== null && mobileField !== undefined) {
-    const gap = (mobileLab - mobileField) / 1000;
-    if (gap >= 3) {
-      findings.push({
-        ruleId: 'lcp-lab-field-gap',
-        category: 'Performance',
-        severity: 'note',
-        title: 'Large gap between lab and field LCP',
-        detail: `Lab LCP is ${(mobileLab / 1000).toFixed(2)}s but field LCP is ${(mobileField / 1000).toFixed(2)}s. The ${gap.toFixed(1)}s gap usually means returning visitors hit cached resources while first-time visitors get the slower lab experience.`,
-      });
-    }
-  }
+  return findings;
+}
 
-  // Rule: mobile performance score ranking
-  const mobileScores = restaurants
-    .map((r) => r.psiMobile?.performance)
-    .filter((v): v is number => v !== undefined && v !== null && v > 0);
-  if (subject.psiMobile?.performance !== undefined && mobileScores.length >= 3) {
-    const rank = rankDesc(mobileScores, subject.psiMobile.performance);
-    if (rank > Math.ceil(mobileScores.length / 2)) {
-      findings.push({
-        ruleId: 'mobile-perf-rank',
-        category: 'Performance',
-        severity: 'warning',
-        title: 'Mobile performance score is below the comp set',
-        detail: `Mobile performance score is ${subject.psiMobile.performance}, ranking ${ordinal(rank)} out of ${mobileScores.length} restaurants tested.`,
-      });
-    }
-  }
+function psiRules(mobile: PSI, desktop: PSI): Finding[] {
+  const findings: Finding[] = [];
 
-  // Rule: desktop performance score ranking
-  const desktopScores = restaurants
-    .map((r) => r.psiDesktop?.performance)
-    .filter((v): v is number => v !== undefined && v !== null && v > 0);
-  if (subject.psiDesktop?.performance !== undefined && subject.psiDesktop.performance > 0 && desktopScores.length >= 3) {
-    const rank = rankDesc(desktopScores, subject.psiDesktop.performance);
-    if (rank > Math.ceil(desktopScores.length / 2)) {
-      findings.push({
-        ruleId: 'desktop-perf-rank',
-        category: 'Performance',
-        severity: 'warning',
-        title: 'Desktop performance score is below the comp set',
-        detail: `Desktop performance score is ${subject.psiDesktop.performance}, ranking ${ordinal(rank)} out of ${desktopScores.length} restaurants tested.`,
-      });
-    }
-  }
-
-  // ============ LISTING (Google Places) ============
-
-  // Rule: rating ranking
-  const ratings = restaurants
-    .map((r) => r.places?.rating)
-    .filter((v): v is number => v !== null && v !== undefined);
-  if (subject.places?.rating !== null && subject.places?.rating !== undefined && ratings.length >= 3) {
-    const rank = rankDesc(ratings, subject.places.rating);
-    if (rank > 1) {
-      findings.push({
-        ruleId: 'rating-rank',
-        category: 'Listing',
-        severity: rank > Math.ceil(ratings.length / 2) ? 'warning' : 'note',
-        title: `Google rating ranks ${ordinal(rank)} of ${ratings.length}`,
-        detail: `Subject rating is ${subject.places.rating} stars. Comp set ratings: ${ratings.sort((a, b) => b - a).join(', ')}.`,
-      });
-    }
-  }
-
-  // Rule: review count ranking
-  const reviewCounts = restaurants
-    .map((r) => r.places?.reviewCount)
-    .filter((v): v is number => v !== null && v !== undefined);
-  if (
-    subject.places?.reviewCount !== null &&
-    subject.places?.reviewCount !== undefined &&
-    reviewCounts.length >= 3
-  ) {
-    const rank = rankDesc(reviewCounts, subject.places.reviewCount);
-    if (rank > Math.ceil(reviewCounts.length / 2)) {
-      findings.push({
-        ruleId: 'review-count-rank',
-        category: 'Listing',
-        severity: 'note',
-        title: `Review count ranks ${ordinal(rank)} of ${reviewCounts.length}`,
-        detail: `Subject has ${subject.places.reviewCount.toLocaleString()} reviews. Comp set: ${reviewCounts.sort((a, b) => b - a).map((n) => n.toLocaleString()).join(', ')}.`,
-      });
-    }
-  }
-
-  // Rule: hours missing
-  if (subject.places && !subject.places.hoursPresent) {
+  if (mobile.performance < 50) {
     findings.push({
-      ruleId: 'hours-missing',
-      category: 'Listing',
-      severity: 'critical',
-      title: 'Hours of operation missing on Google listing',
-      detail: 'Hours are a top-tier signal Google uses to decide when to show your restaurant in "open now" searches. Without hours, you are invisible during the moments customers are deciding where to go right now.',
+      ruleId: 'mobile-perf-low',
+      severity: mobile.performance < 30 ? 'critical' : 'warning',
+      title: `Mobile performance score is ${mobile.performance}`,
+      detail: `Google's mobile performance score for this site is ${mobile.performance} out of 100. Below 50 indicates poor user experience and hurts search rankings on mobile, which is the majority of restaurant search traffic.`,
+      category: 'Performance',
     });
   }
 
-  // ============ SEO (On-Page) ============
+  if (desktop.performance < 50) {
+    findings.push({
+      ruleId: 'desktop-perf-low',
+      severity: desktop.performance < 30 ? 'critical' : 'warning',
+      title: `Desktop performance score is ${desktop.performance}`,
+      detail: `Google's desktop performance score for this site is ${desktop.performance} out of 100. Below 50 indicates poor user experience.`,
+      category: 'Performance',
+    });
+  }
 
-  if (subject.onpage) {
-    const o = subject.onpage;
+  if (mobile.lcp > 4000) {
+    findings.push({
+      ruleId: 'mobile-lcp-slow',
+      severity: mobile.lcp > 6000 ? 'warning' : 'note',
+      title: `Mobile LCP is ${(mobile.lcp / 1000).toFixed(1)}s`,
+      detail: `Largest Contentful Paint on mobile is ${(mobile.lcp / 1000).toFixed(1)}s. Google considers anything over 2.5s as needing improvement and over 4s as poor. LCP is one of the three Core Web Vitals.`,
+      category: 'Performance',
+    });
+  }
 
-    // Rule: title missing or too short
-    if (!o.title || o.titleLength < 10) {
+  if (mobile.fieldLcp !== null && mobile.lcp > 0) {
+    const labFieldGap = Math.abs(mobile.lcp - mobile.fieldLcp);
+    if (labFieldGap > 2500) {
       findings.push({
-        ruleId: 'title-missing',
-        category: 'SEO',
-        severity: 'critical',
-        title: 'Page title is missing or too short',
-        detail: o.title
-          ? `Page title is only ${o.titleLength} characters: "${o.title}". This is the headline Google shows in search results.`
-          : 'No <title> tag found. This is the headline Google shows in search results.',
-      });
-    } else if (o.titleLength > 70) {
-      findings.push({
-        ruleId: 'title-too-long',
-        category: 'SEO',
+        ruleId: 'lab-field-lcp-gap',
         severity: 'note',
-        title: 'Page title may get truncated in search results',
-        detail: `Title is ${o.titleLength} characters. Google typically truncates titles around 60 characters in search snippets, though longer is not penalized.`,
-      });
-    }
-
-    // Rule: meta description missing or out of range
-    if (!o.metaDescription) {
-      findings.push({
-        ruleId: 'meta-description-missing',
-        category: 'SEO',
-        severity: 'warning',
-        title: 'Meta description missing',
-        detail: 'Without a meta description, Google generates one from page content, which often produces awkward results. The meta description is the snippet under your title in search listings.',
-      });
-    } else if (o.metaDescriptionLength > 200) {
-      findings.push({
-        ruleId: 'meta-description-too-long',
-        category: 'SEO',
-        severity: 'note',
-        title: 'Meta description exceeds the display window',
-        detail: `Meta description is ${o.metaDescriptionLength} characters. Google truncates around 155-160 characters in search results, so the rest is invisible to most users.`,
-      });
-    }
-
-    // Rule: canonical missing
-    if (!o.canonical) {
-      const compsWithCanonical = competitors.filter((c) => c.onpage?.canonical).length;
-      findings.push({
-        ruleId: 'canonical-missing',
-        category: 'SEO',
-        severity: 'warning',
-        title: 'Canonical URL missing',
-        detail: `No canonical URL declared. Without one, Google may index duplicate URLs (with/without trailing slash, http/https) as separate pages and split ranking signal. ${compsWithCanonical} of ${competitors.length} competitors have a canonical set.`,
-      });
-    }
-
-    // Rule: H1 count
-    if (o.h1Count === 0) {
-      findings.push({
-        ruleId: 'h1-missing',
-        category: 'SEO',
-        severity: 'warning',
-        title: 'No H1 heading on the page',
-        detail: "Every page should have one H1 tag describing what the page is about. It is one of Google's strongest on-page topical signals.",
-      });
-    } else if (o.h1Count > 1) {
-      const compsWithSingleH1 = competitors.filter((c) => c.onpage?.h1Count === 1).length;
-      findings.push({
-        ruleId: 'h1-multiple',
-        category: 'SEO',
-        severity: 'warning',
-        title: `Page has ${o.h1Count} H1 tags`,
-        detail: `Best practice is one H1 per page. Multiple H1s dilute the topical signal. ${compsWithSingleH1} of ${competitors.length} competitors have exactly one H1.`,
-      });
-    }
-
-    // Rule: images missing alt text
-    if (o.imgCount > 0 && o.imgWithoutAlt > 0) {
-      const ratio = o.imgWithoutAlt / o.imgCount;
-      if (ratio >= 0.5) {
-        findings.push({
-          ruleId: 'alt-text-poor',
-          category: 'SEO',
-          severity: 'warning',
-          title: 'Most images are missing alt text',
-          detail: `${o.imgWithoutAlt} of ${o.imgCount} images have no alt attribute. Alt text helps screen readers, image search ranking, and provides fallback when images fail to load.`,
-        });
-      } else if (o.imgWithoutAlt >= 1) {
-        findings.push({
-          ruleId: 'alt-text-some-missing',
-          category: 'SEO',
-          severity: 'note',
-          title: 'Some images missing alt text',
-          detail: `${o.imgWithoutAlt} of ${o.imgCount} images have no alt attribute.`,
-        });
-      }
-    }
-
-    // Rule: schema missing LocalBusiness or restaurant type
-    if (!o.schema.present) {
-      const compsWithSchema = competitors.filter((c) => c.onpage?.schema.present).length;
-      findings.push({
-        ruleId: 'schema-missing',
-        category: 'SEO',
-        severity: 'critical',
-        title: 'No structured data on the page',
-        detail: `No Schema.org structured data found. This is what enables Google to show rich results (rating, hours, photos) for restaurant searches. ${compsWithSchema} of ${competitors.length} competitors have structured data.`,
-      });
-    } else if (!hasLocalBusinessSchema(o.schema.types)) {
-      const compsWithLocal = competitors.filter(
-        (c) => c.onpage && hasLocalBusinessSchema(c.onpage.schema.types)
-      ).length;
-      findings.push({
-        ruleId: 'schema-no-localbusiness',
-        category: 'SEO',
-        severity: 'warning',
-        title: 'Structured data does not declare a restaurant type',
-        detail: `Schema is present (${o.schema.types.join(', ')}) but no LocalBusiness, Restaurant, BarOrPub, or FoodEstablishment type is declared. These are the types Google uses for rich restaurant results. ${compsWithLocal} of ${competitors.length} competitors declare a restaurant-type schema.`,
-      });
-    }
-
-    // Rule: menu page not detected
-    if (!o.menu.detected) {
-      const compsWithMenu = competitors.filter((c) => c.onpage?.menu.detected).length;
-      findings.push({
-        ruleId: 'menu-not-found',
-        category: 'SEO',
-        severity: 'warning',
-        title: 'No link to a menu page found',
-        detail: `Could not find a link from the homepage to anything containing "menu". ${compsWithMenu} of ${competitors.length} competitors have a detectable menu page. The menu is the most-searched-for thing on a restaurant website.`,
-      });
-    }
-
-    // Rule: word count too low
-    if (o.wordCount < 100) {
-      findings.push({
-        ruleId: 'content-too-thin',
-        category: 'SEO',
-        severity: 'warning',
-        title: 'Homepage content is very thin',
-        detail: `Homepage has only ${o.wordCount} words of content. Google needs text to understand what a page is about. Below 100 words usually means the page is mostly images with little context.`,
+        title: 'Large gap between lab and field LCP',
+        detail: `Lab LCP is ${(mobile.lcp / 1000).toFixed(2)}s but field LCP is ${(mobile.fieldLcp / 1000).toFixed(2)}s. The ${(labFieldGap / 1000).toFixed(1)}s gap usually means returning visitors hit cached resources while first-time visitors get the slower lab experience.`,
+        category: 'Performance',
       });
     }
   }
 
-  // ============ SOCIAL (Open Graph) ============
-
-  if (subject.onpage) {
-    const og = subject.onpage.openGraph;
-    const compsWithOgImage = competitors.filter(
-      (c) => c.onpage && ogImageIsValid(c.onpage.openGraph.image)
-    ).length;
-
-    if (!og.present) {
-      findings.push({
-        ruleId: 'og-missing',
-        category: 'Social',
-        severity: 'warning',
-        title: 'Open Graph tags missing',
-        detail: `When the URL is shared on Facebook, LinkedIn, or in messages, no preview image, title, or description appears. ${compsWithOgImage} of ${competitors.length} competitors have a working og:image.`,
-      });
-    } else if (!ogImageIsValid(og.image)) {
-      findings.push({
-        ruleId: 'og-image-missing',
-        category: 'Social',
-        severity: 'warning',
-        title: 'Social share preview image missing',
-        detail: `og:image is not set${og.image === 'false' ? ' (set to invalid value "false")' : ''}. When the URL is shared on Facebook, LinkedIn, or in messages, no preview image appears. ${compsWithOgImage} of ${competitors.length} competitors have a working og:image.`,
-      });
-    }
+  if (mobile.cls > 0.1) {
+    findings.push({
+      ruleId: 'mobile-cls-high',
+      severity: mobile.cls > 0.25 ? 'warning' : 'note',
+      title: `Mobile CLS is ${mobile.cls.toFixed(3)}`,
+      detail: `Cumulative Layout Shift on mobile is ${mobile.cls.toFixed(3)}. Google considers above 0.1 as needing improvement. Layout shifts during loading frustrate users and signal poor production quality.`,
+      category: 'Performance',
+    });
   }
 
-  // Sort: critical first, then warning, then note. Within severity, by category.
-  const severityOrder = { critical: 0, warning: 1, note: 2 };
-  findings.sort((a, b) => {
-    if (severityOrder[a.severity] !== severityOrder[b.severity]) {
-      return severityOrder[a.severity] - severityOrder[b.severity];
-    }
-    return a.category.localeCompare(b.category);
-  });
+  return findings;
+}
+
+function placesRules(places: Places): Finding[] {
+  const findings: Finding[] = [];
+
+  if (!places.hoursPresent) {
+    findings.push({
+      ruleId: 'no-hours',
+      severity: 'critical',
+      title: 'No business hours on Google',
+      detail:
+        'No operating hours are listed on the Google Business Profile. Customers searching at night or on weekends cannot tell if the restaurant is open, so many will choose a competitor whose hours are visible.',
+      category: 'Listing',
+    });
+  }
+
+  if (places.photoCount < 5) {
+    findings.push({
+      ruleId: 'low-photo-count',
+      severity: places.photoCount === 0 ? 'warning' : 'note',
+      title: `Only ${places.photoCount} photo${places.photoCount === 1 ? '' : 's'} on Google`,
+      detail: `The Google Business Profile has ${places.photoCount} photo${places.photoCount === 1 ? '' : 's'}. Restaurants with rich photo galleries (food, interior, exterior, team) consistently get more profile views and clicks to website than those without.`,
+      category: 'Listing',
+    });
+  }
+
+  if (places.rating !== null && places.rating < 4.0) {
+    findings.push({
+      ruleId: 'rating-below-threshold',
+      severity: places.rating < 3.5 ? 'warning' : 'note',
+      title: `Google rating is ${places.rating}`,
+      detail: `The current Google rating is ${places.rating} out of 5. Most diners filter out anything below 4.0 in their default search experience, which means this rating reduces the pool of customers who ever see the listing.`,
+      category: 'Reputation',
+    });
+  }
+
+  if (places.reviewCount !== null && places.reviewCount < 25) {
+    findings.push({
+      ruleId: 'low-review-count',
+      severity: 'note',
+      title: `Only ${places.reviewCount} reviews on Google`,
+      detail: `The Google Business Profile has ${places.reviewCount} reviews. Low review count limits how confident new customers feel choosing this restaurant, regardless of the rating.`,
+      category: 'Reputation',
+    });
+  }
+
+  return findings;
+}
+
+function onPageRules(onpage: OnPage): Finding[] {
+  const findings: Finding[] = [];
+
+  if (onpage.statusCode !== 200) {
+    findings.push({
+      ruleId: 'non-200-status',
+      severity: 'critical',
+      title: `Website returns HTTP ${onpage.statusCode}`,
+      detail: `The website returned status code ${onpage.statusCode}. Anything other than 200 means search engines may not crawl this page properly and customers may hit errors.`,
+      category: 'SEO',
+    });
+  }
+
+  if (!onpage.title || onpage.titleLength === 0) {
+    findings.push({
+      ruleId: 'title-missing',
+      severity: 'critical',
+      title: 'No page title tag',
+      detail:
+        'The page has no title tag. The title tag is what shows in search results and browser tabs. Missing it is a fundamental SEO problem.',
+      category: 'SEO',
+    });
+  } else if (onpage.titleLength < 30) {
+    findings.push({
+      ruleId: 'title-too-short',
+      severity: 'note',
+      title: `Page title is only ${onpage.titleLength} characters`,
+      detail: `The title tag is ${onpage.titleLength} characters. Search results show roughly 50-60 characters, so a short title leaves space unused that could include the city, cuisine, or differentiator.`,
+      category: 'SEO',
+    });
+  } else if (onpage.titleLength > 60) {
+    findings.push({
+      ruleId: 'title-too-long',
+      severity: 'note',
+      title: `Page title is ${onpage.titleLength} characters`,
+      detail: `The title tag is ${onpage.titleLength} characters. Google truncates around 60 characters in search results, so the end of the title is invisible to most users.`,
+      category: 'SEO',
+    });
+  }
+
+  if (!onpage.metaDescription || onpage.metaDescriptionLength === 0) {
+    findings.push({
+      ruleId: 'meta-desc-missing',
+      severity: 'warning',
+      title: 'No meta description',
+      detail:
+        'The page has no meta description. Search engines will auto-generate one from page content, which is rarely as compelling as a hand-written description that frames why a customer should click through.',
+      category: 'SEO',
+    });
+  } else if (onpage.metaDescriptionLength > 160) {
+    findings.push({
+      ruleId: 'meta-desc-too-long',
+      severity: 'note',
+      title: 'Meta description exceeds the display window',
+      detail: `Meta description is ${onpage.metaDescriptionLength} characters. Google truncates around 155-160 characters in search results, so the rest is invisible to most users.`,
+      category: 'SEO',
+    });
+  }
+
+  if (!onpage.canonical) {
+    findings.push({
+      ruleId: 'canonical-missing',
+      severity: 'note',
+      title: 'No canonical tag',
+      detail:
+        'No canonical URL is declared on the page. Canonical tags tell search engines which version of a URL is the official one, preventing duplicate content issues from query strings or trailing slashes.',
+      category: 'SEO',
+    });
+  }
+
+  if (onpage.h1Count === 0) {
+    findings.push({
+      ruleId: 'h1-missing',
+      severity: 'warning',
+      title: 'No H1 heading on the page',
+      detail:
+        "Every page should have one H1 tag describing what the page is about. It is one of Google's strongest on-page topical signals.",
+      category: 'SEO',
+    });
+  } else if (onpage.h1Count > 1) {
+    findings.push({
+      ruleId: 'h1-multiple',
+      severity: 'note',
+      title: `${onpage.h1Count} H1 tags on the page`,
+      detail: `The page has ${onpage.h1Count} H1 tags. Best practice is one H1 per page so search engines can clearly identify the primary topic.`,
+      category: 'SEO',
+    });
+  }
+
+  if (onpage.imgCount > 0 && onpage.imgWithoutAlt > 0) {
+    const ratio = onpage.imgWithoutAlt / onpage.imgCount;
+    findings.push({
+      ruleId: 'images-missing-alt',
+      severity: ratio > 0.5 ? 'warning' : 'note',
+      title: 'Some images missing alt text',
+      detail: `${onpage.imgWithoutAlt} of ${onpage.imgCount} images have no alt attribute.`,
+      category: 'SEO',
+    });
+  }
+
+  if (!onpage.schema.present) {
+    findings.push({
+      ruleId: 'schema-missing',
+      severity: 'warning',
+      title: 'No structured data on the page',
+      detail:
+        'No schema.org structured data was found. Restaurant schema (with cuisine, address, hours, menu URL, rating) lets Google show rich results for the listing, which dramatically increases click-through rates.',
+      category: 'SEO',
+    });
+  } else if (
+    !onpage.schema.types.includes('Restaurant') &&
+    !onpage.schema.types.includes('FoodEstablishment') &&
+    !onpage.schema.types.includes('LocalBusiness')
+  ) {
+    findings.push({
+      ruleId: 'schema-no-localbusiness',
+      severity: 'note',
+      title: 'Schema present but no Restaurant or LocalBusiness type',
+      detail: `Structured data is present (${onpage.schema.types.join(', ') || 'no recognized types'}) but does not include Restaurant, FoodEstablishment, or LocalBusiness schema. Those specific types unlock the rich result features that matter for restaurants.`,
+      category: 'SEO',
+    });
+  }
+
+  if (!onpage.menu.detected) {
+    findings.push({
+      ruleId: 'menu-not-found',
+      severity: 'note',
+      title: 'No menu detected on the homepage',
+      detail:
+        'No menu link or menu content was found on the homepage. Customers expect to find the menu within one click; missing it is a common reason customers bounce to a competitor.',
+      category: 'SEO',
+    });
+  } else if (onpage.menu.format === 'pdf') {
+    findings.push({
+      ruleId: 'menu-as-pdf',
+      severity: 'warning',
+      title: 'Menu is a PDF',
+      detail:
+        'The menu is served as a PDF. PDFs do not display well on mobile (where most restaurant searches happen), are not crawlable for menu-item search, and slow page load. Convert to HTML for the public-facing version.',
+      category: 'SEO',
+    });
+  }
+
+  if (!onpage.openGraph.present) {
+    findings.push({
+      ruleId: 'og-missing',
+      severity: 'note',
+      title: 'No Open Graph tags',
+      detail:
+        'No Open Graph meta tags were found. These control how the page looks when shared on Facebook, LinkedIn, Slack, and most messaging apps. Without them, social shares get a generic preview that does not represent the restaurant well.',
+      category: 'SEO',
+    });
+  } else if (!onpage.openGraph.image || onpage.openGraph.image === 'false') {
+    findings.push({
+      ruleId: 'og-image-missing',
+      severity: 'note',
+      title: 'No og:image tag',
+      detail:
+        'Open Graph tags are present but no og:image is declared. Social shares will fall back to whatever image the platform picks, often something off-brand or unrelated.',
+      category: 'SEO',
+    });
+  }
 
   return findings;
 }
