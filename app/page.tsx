@@ -106,15 +106,27 @@ async function runPSI(url: string, strategy: Strategy): Promise<PSIData> {
     const body = await res.text();
     throw new Error(`PSI ${strategy} ${res.status}: ${body.slice(0, 150)}`);
   }
-
   const json = await res.json();
+
   const lighthouse = json.lighthouseResult;
   const audits = lighthouse.audits;
   const field = json.loadingExperience?.metrics ?? {};
 
+  const rawScore = lighthouse?.categories?.performance?.score;
+  if (rawScore === null || rawScore === undefined) {
+    throw new Error(`PSI ${strategy} did not return a performance score`);
+  }
+
+  const performance = Math.round(rawScore * 100);
+  const lcp = audits['largest-contentful-paint']?.numericValue ?? 0;
+
+  if (performance === 0 && lcp === 0) {
+    throw new Error(`PSI ${strategy} reported unmeasurable result (score 0, no LCP)`);
+  }
+
   return {
-    performance: Math.round(lighthouse.categories.performance.score * 100),
-    lcp: audits['largest-contentful-paint']?.numericValue ?? 0,
+    performance,
+    lcp,
     cls: audits['cumulative-layout-shift']?.numericValue ?? 0,
     tbt: audits['total-blocking-time']?.numericValue ?? 0,
     fcp: audits['first-contentful-paint']?.numericValue ?? 0,
