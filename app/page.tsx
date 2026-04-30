@@ -61,13 +61,6 @@ type AuditEntry = {
 };
 
 type AuditResponse = {
-  subject?: {
-    placeId: string;
-    location: { latitude: number; longitude: number };
-    primaryType: string | null;
-    competitorQuery: string;
-  };
-  discovered: { totalResults: number; afterFiltering: number; taken: number };
   restaurantCount: number;
   results: AuditEntry[];
   elapsed: number;
@@ -121,7 +114,9 @@ async function runPSI(url: string, strategy: Strategy): Promise<PSIData> {
   const lcp = audits['largest-contentful-paint']?.numericValue ?? 0;
 
   if (performance === 0 && lcp === 0) {
-    throw new Error(`PSI ${strategy} reported unmeasurable result (score 0, no LCP)`);
+    throw new Error(
+      `PSI ${strategy} reported unmeasurable result (score 0, no LCP)`
+    );
   }
 
   return {
@@ -155,8 +150,6 @@ export default function Home() {
   const [selectedPlaceId, setSelectedPlaceId] = useState<string | null>(null);
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [selectedAddress, setSelectedAddress] = useState<string | null>(null);
-  const [categoryQuery, setCategoryQuery] = useState('');
-  const [loadingDetails, setLoadingDetails] = useState(false);
   const [sessionToken, setSessionToken] = useState<string | null>(null);
 
   // Debounced autocomplete fetch. Only runs when no selection is active and
@@ -209,26 +202,20 @@ export default function Home() {
     setSelectedAddress(s.secondaryText);
     setQuery('');
     setSuggestions([]);
-    setLoadingDetails(true);
-    setCategoryQuery('');
 
-    try {
+    // Fire-and-forget Place Details call to close the autocomplete session.
+    // Google bills autocomplete + Place Details as one session when the
+    // sessionToken is included on both calls. Result is discarded; the audit
+    // route fetches Place Details server-side independently.
+    if (sessionToken) {
       const params = new URLSearchParams();
       params.set('placeId', s.placeId);
-      if (sessionToken) params.set('sessionToken', sessionToken);
-      const res = await fetch(`/api/places?${params.toString()}`);
-      if (res.ok) {
-        const data: PlacesData = await res.json();
-        const primaryType = data.primaryType ?? 'restaurant';
-        setCategoryQuery(primaryType.replace(/_/g, ' '));
-      }
-    } catch {
-      // leave category blank for manual entry
+      params.set('sessionToken', sessionToken);
+      fetch(`/api/places?${params.toString()}`).catch(() => {
+        // session closure is a billing optimization, not critical
+      });
     }
 
-    setLoadingDetails(false);
-    // Session is closed once Place Details is fetched. Clear the token so the
-    // next search after a "Change" action starts a fresh session.
     setSessionToken(null);
   }
 
@@ -236,7 +223,6 @@ export default function Home() {
     setSelectedPlaceId(null);
     setSelectedName(null);
     setSelectedAddress(null);
-    setCategoryQuery('');
     setQuery('');
     setSuggestions([]);
     setRestaurants([]);
@@ -247,8 +233,7 @@ export default function Home() {
   }
 
   // Findings recompute whenever restaurant state changes (PSI calls finishing).
-  // We only show findings once all PSI calls have either completed or errored,
-  // because some rules depend on competitor PSI scores.
+  // We only show findings once all PSI calls have either completed or errored.
   const findings = useMemo<Finding[]>(() => {
     if (restaurants.length === 0) return [];
     if (running) return [];
@@ -285,8 +270,6 @@ export default function Home() {
     try {
       const params = new URLSearchParams();
       params.set('subjectPlaceId', selectedPlaceId);
-      const trimmedCategory = categoryQuery.trim();
-      if (trimmedCategory) params.set('competitorQuery', trimmedCategory);
 
       const res = await fetch(`/api/audit?${params.toString()}`);
       if (!res.ok) throw new Error(`Audit route returned ${res.status}`);
@@ -365,7 +348,7 @@ export default function Home() {
     >
       <h1 style={{ fontSize: 22, marginBottom: 8 }}>Restaurant Audit</h1>
       <p style={{ color: '#555', marginTop: 0, marginBottom: 24 }}>
-        Search for a restaurant, then audit it against four nearby competitors.
+        Search for a restaurant, then run the audit.
       </p>
 
       {!selectedPlaceId && (
@@ -382,9 +365,6 @@ export default function Home() {
         <SelectionCard
           name={selectedName}
           address={selectedAddress}
-          categoryQuery={categoryQuery}
-          setCategoryQuery={setCategoryQuery}
-          loadingDetails={loadingDetails}
           onChange={clearSelection}
         />
       )}
@@ -462,7 +442,6 @@ export default function Home() {
       )}
 
       {findings.length > 0 && <FindingsSection findings={findings} />}
-      {restaurants.length > 0 && <ComparisonTable restaurants={restaurants} />}
     </main>
   );
 }
@@ -541,7 +520,8 @@ function SearchBox({
                 borderBottom: '1px solid #f0f0f0',
               }}
               onMouseEnter={(e) =>
-                ((e.currentTarget as HTMLLIElement).style.background = '#f5f5f5')
+                ((e.currentTarget as HTMLLIElement).style.background =
+                  '#f5f5f5')
               }
               onMouseLeave={(e) =>
                 ((e.currentTarget as HTMLLIElement).style.background = '#fff')
@@ -562,16 +542,10 @@ function SearchBox({
 function SelectionCard({
   name,
   address,
-  categoryQuery,
-  setCategoryQuery,
-  loadingDetails,
   onChange,
 }: {
   name: string | null;
   address: string | null;
-  categoryQuery: string;
-  setCategoryQuery: (s: string) => void;
-  loadingDetails: boolean;
   onChange: () => void;
 }) {
   return (
@@ -616,45 +590,6 @@ function SelectionCard({
           Change
         </button>
       </div>
-
-      <label
-        style={{
-          display: 'block',
-          fontSize: 12,
-          color: '#555',
-          marginTop: 14,
-          marginBottom: 6,
-        }}
-      >
-        Competitor category{' '}
-        {loadingDetails && (
-          <span style={{ color: '#888' }}>(loading...)</span>
-        )}
-      </label>
-      <input
-        type="text"
-        value={categoryQuery}
-        onChange={(e) => setCategoryQuery(e.target.value)}
-        placeholder="e.g. sports bar, taqueria, pizza"
-        style={{
-          width: '100%',
-          padding: '8px 10px',
-          fontSize: 13,
-          border: '1px solid #ccc',
-          borderRadius: 4,
-          fontFamily: 'inherit',
-          boxSizing: 'border-box',
-        }}
-      />
-      <p
-        style={{
-          fontSize: 11,
-          color: '#888',
-          margin: '4px 0 0 0',
-        }}
-      >
-        Auto-detected from Google. Edit if it is wrong.
-      </p>
     </div>
   );
 }
@@ -674,22 +609,19 @@ function FindingsSection({ findings }: { findings: Finding[] }) {
           ({findings.length})
         </span>
       </h2>
-      <p
-        style={{
-          color: '#888',
-          fontSize: 12,
-          marginTop: 0,
-          marginBottom: 16,
-        }}
-      >
-        Subject restaurant only. Detailed metrics for all five restaurants in
-        the comparison table below.
-      </p>
       {grouped.critical.length > 0 && (
-        <FindingGroup title="Critical" findings={grouped.critical} color="#b00020" />
+        <FindingGroup
+          title="Critical"
+          findings={grouped.critical}
+          color="#b00020"
+        />
       )}
       {grouped.warning.length > 0 && (
-        <FindingGroup title="Warning" findings={grouped.warning} color="#a06800" />
+        <FindingGroup
+          title="Warning"
+          findings={grouped.warning}
+          color="#a06800"
+        />
       )}
       {grouped.note.length > 0 && (
         <FindingGroup title="Note" findings={grouped.note} color="#666" />
@@ -771,255 +703,8 @@ function FindingGroup({
   );
 }
 
-function ComparisonTable({ restaurants }: { restaurants: RestaurantState[] }) {
-  const ordered = [
-    ...restaurants.filter((r) => r.isSubject),
-    ...restaurants.filter((r) => !r.isSubject),
-  ];
-
-  return (
-    <details style={{ marginTop: 24 }}>
-      <summary
-        style={{
-          cursor: 'pointer',
-          fontSize: 14,
-          color: '#555',
-          marginBottom: 12,
-        }}
-      >
-        Detailed comparison data (all five restaurants)
-      </summary>
-      <div style={{ overflowX: 'auto', marginTop: 12 }}>
-        <table
-          style={{
-            width: '100%',
-            borderCollapse: 'collapse',
-            fontSize: 13,
-            tableLayout: 'fixed',
-          }}
-        >
-          <thead>
-            <tr>
-              <th style={headerCellStyle('label')}>&nbsp;</th>
-              {ordered.map((r, i) => (
-                <th key={i} style={headerCellStyle(r.isSubject ? 'subject' : 'comp')}>
-                  <div style={{ fontWeight: 600 }}>{r.name}</div>
-                  {r.isSubject && (
-                    <div
-                      style={{
-                        fontSize: 11,
-                        color: '#0066cc',
-                        fontWeight: 500,
-                      }}
-                    >
-                      SUBJECT
-                    </div>
-                  )}
-                  {r.places?.address && (
-                    <div
-                      style={{
-                        fontSize: 11,
-                        color: '#888',
-                        fontWeight: 400,
-                        marginTop: 2,
-                      }}
-                    >
-                      {r.places.address.split(',').slice(0, 2).join(',')}
-                    </div>
-                  )}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            <SectionRow label="GOOGLE LISTING" colSpan={ordered.length + 1} />
-            <DataRow label="Rating" ordered={ordered} get={(r) => fmtRating(r.places)} />
-            <DataRow label="Review count" ordered={ordered} get={(r) => fmtNum(r.places?.reviewCount)} />
-            <DataRow label="Price level" ordered={ordered} get={(r) => fmtPriceLevel(r.places?.priceLevel)} />
-            <DataRow label="Photos (capped)" ordered={ordered} get={(r) => String(r.places?.photoCount ?? '-')} />
-            <DataRow label="Hours present" ordered={ordered} get={(r) => (r.places?.hoursPresent ? 'yes' : 'no')} />
-            <DataRow label="Primary type" ordered={ordered} get={(r) => r.places?.primaryType ?? '-'} />
-            <SectionRow label="PAGESPEED - MOBILE" colSpan={ordered.length + 1} />
-            <DataRow
-              label="Performance score"
-              ordered={ordered}
-              get={(r) => (r.psiMobile ? String(r.psiMobile.performance) : r.psiMobileError ? 'err' : '...')}
-              highlight={(r) => psiScoreColor(r.psiMobile?.performance)}
-            />
-            <DataRow label="LCP lab" ordered={ordered} get={(r) => fmtMs(r.psiMobile?.lcp)} />
-            <DataRow label="LCP field p75" ordered={ordered} get={(r) => fmtFieldMs(r.psiMobile?.fieldLcp)} />
-            <DataRow label="CLS lab" ordered={ordered} get={(r) => fmtCls(r.psiMobile?.cls)} />
-            <DataRow label="TBT lab" ordered={ordered} get={(r) => fmtMsRaw(r.psiMobile?.tbt)} />
-            <DataRow label="TTFB" ordered={ordered} get={(r) => fmtMsRaw(r.psiMobile?.ttfb)} />
-            <SectionRow label="PAGESPEED - DESKTOP" colSpan={ordered.length + 1} />
-            <DataRow
-              label="Performance score"
-              ordered={ordered}
-              get={(r) => (r.psiDesktop ? String(r.psiDesktop.performance) : r.psiDesktopError ? 'err' : '...')}
-              highlight={(r) => psiScoreColor(r.psiDesktop?.performance)}
-            />
-            <DataRow label="LCP lab" ordered={ordered} get={(r) => fmtMs(r.psiDesktop?.lcp)} />
-            <DataRow label="CLS lab" ordered={ordered} get={(r) => fmtCls(r.psiDesktop?.cls)} />
-            <DataRow label="TBT lab" ordered={ordered} get={(r) => fmtMsRaw(r.psiDesktop?.tbt)} />
-            <DataRow label="TTFB" ordered={ordered} get={(r) => fmtMsRaw(r.psiDesktop?.ttfb)} />
-            <SectionRow label="ON-PAGE SEO" colSpan={ordered.length + 1} />
-            <DataRow label="Status" ordered={ordered} get={(r) => String(r.onpage?.statusCode ?? '-')} />
-            <DataRow
-              label="Title length"
-              ordered={ordered}
-              get={(r) => (r.onpage?.titleLength ? `${r.onpage.titleLength} chars` : 'missing')}
-            />
-            <DataRow
-              label="Meta desc length"
-              ordered={ordered}
-              get={(r) =>
-                r.onpage?.metaDescriptionLength
-                  ? `${r.onpage.metaDescriptionLength} chars`
-                  : 'missing'
-              }
-            />
-            <DataRow label="Canonical" ordered={ordered} get={(r) => (r.onpage?.canonical ? 'yes' : 'no')} />
-            <DataRow
-              label="H1 count"
-              ordered={ordered}
-              get={(r) => String(r.onpage?.h1Count ?? '-')}
-              highlight={(r) =>
-                r.onpage && r.onpage.h1Count > 1 ? '#fee' : r.onpage?.h1Count === 1 ? null : null
-              }
-            />
-            <DataRow label="H2 count" ordered={ordered} get={(r) => String(r.onpage?.h2Count ?? '-')} />
-            <DataRow
-              label="Img missing alt"
-              ordered={ordered}
-              get={(r) => (r.onpage ? `${r.onpage.imgWithoutAlt} of ${r.onpage.imgCount}` : '-')}
-            />
-            <DataRow
-              label="Open Graph"
-              ordered={ordered}
-              get={(r) => (r.onpage?.openGraph.present ? 'yes' : 'no')}
-            />
-            <DataRow
-              label="og:image"
-              ordered={ordered}
-              get={(r) => {
-                const img = r.onpage?.openGraph.image;
-                if (!img || img === 'false') return 'missing';
-                return 'set';
-              }}
-            />
-            <DataRow
-              label="Twitter Card"
-              ordered={ordered}
-              get={(r) => r.onpage?.twitterCard ?? 'missing'}
-            />
-            <DataRow
-              label="Schema types"
-              ordered={ordered}
-              get={(r) => {
-                if (!r.onpage?.schema.present) return 'none';
-                const types = r.onpage.schema.types;
-                if (types.length === 0) return `${r.onpage.schema.blockCount} block, no types`;
-                return types.join(', ');
-              }}
-            />
-            <DataRow
-              label="Menu page"
-              ordered={ordered}
-              get={(r) => {
-                if (!r.onpage) return '-';
-                if (!r.onpage.menu.detected) return 'not found';
-                return r.onpage.menu.format ?? 'detected';
-              }}
-            />
-            <DataRow label="Word count" ordered={ordered} get={(r) => String(r.onpage?.wordCount ?? '-')} />
-            <DataRow label="HTML size" ordered={ordered} get={(r) => (r.onpage ? `${r.onpage.htmlSizeKb} KB` : '-')} />
-          </tbody>
-        </table>
-      </div>
-    </details>
-  );
-}
-
-function DataRow({
-  label,
-  ordered,
-  get,
-  highlight,
-}: {
-  label: string;
-  ordered: RestaurantState[];
-  get: (r: RestaurantState) => string;
-  highlight?: (r: RestaurantState) => string | null;
-}) {
-  return (
-    <tr>
-      <td style={labelCellStyle()}>{label}</td>
-      {ordered.map((r, i) => {
-        const bg = highlight ? highlight(r) : null;
-        return (
-          <td key={i} style={dataCellStyle(r.isSubject, bg)}>
-            {get(r)}
-          </td>
-        );
-      })}
-    </tr>
-  );
-}
-
-function SectionRow({ label, colSpan }: { label: string; colSpan: number }) {
-  return (
-    <tr>
-      <td
-        colSpan={colSpan}
-        style={{
-          padding: '14px 8px 6px',
-          fontSize: 11,
-          fontWeight: 600,
-          color: '#666',
-          textTransform: 'uppercase',
-          letterSpacing: 0.5,
-          borderTop: '1px solid #eee',
-        }}
-      >
-        {label}
-      </td>
-    </tr>
-  );
-}
-
-function headerCellStyle(kind: 'label' | 'subject' | 'comp'): React.CSSProperties {
-  return {
-    textAlign: 'left',
-    verticalAlign: 'top',
-    padding: '8px',
-    borderBottom: '2px solid #ddd',
-    background: kind === 'subject' ? '#eef6ff' : '#fafafa',
-    width: kind === 'label' ? '160px' : 'auto',
-    fontSize: 12,
-  };
-}
-
-function labelCellStyle(): React.CSSProperties {
-  return {
-    padding: '6px 8px',
-    color: '#555',
-    borderBottom: '1px solid #f0f0f0',
-    verticalAlign: 'top',
-    width: '160px',
-  };
-}
-
-function dataCellStyle(isSubject: boolean, bg: string | null): React.CSSProperties {
-  return {
-    padding: '6px 8px',
-    borderBottom: '1px solid #f0f0f0',
-    verticalAlign: 'top',
-    background: bg ?? (isSubject ? '#f5faff' : 'transparent'),
-    fontFamily: 'monospace',
-    fontSize: 12,
-    wordBreak: 'break-word',
-  };
-}
+// Formatting helpers preserved for reuse in Phase 1F (Path A direct assessment).
+// These were used by the comparison table that was removed in this commit.
 
 function fmtMs(ms: number | undefined): string {
   if (ms === undefined) return '...';
