@@ -442,7 +442,211 @@ export default function Home() {
       )}
 
       {findings.length > 0 && <FindingsSection findings={findings} />}
+      {restaurants.length > 0 && <DetailsPanel restaurant={restaurants[0]} />}
     </main>
+  );
+}
+
+function DetailsPanel({ restaurant }: { restaurant: RestaurantState }) {
+  return (
+    <details style={{ marginTop: 24 }}>
+      <summary
+        style={{
+          cursor: 'pointer',
+          fontSize: 14,
+          color: '#555',
+          marginBottom: 12,
+        }}
+      >
+        Detailed audit data
+      </summary>
+      <div style={{ marginTop: 12, maxWidth: 800 }}>
+        <table
+          style={{
+            width: '100%',
+            borderCollapse: 'collapse',
+            fontSize: 13,
+            tableLayout: 'fixed',
+          }}
+        >
+          <tbody>
+            <DetailsSection label="GOOGLE LISTING" />
+            <DetailsRow label="Rating" value={fmtRating(restaurant.places)} />
+            <DetailsRow label="Review count" value={fmtNum(restaurant.places?.reviewCount)} />
+            <DetailsRow label="Price level" value={fmtPriceLevel(restaurant.places?.priceLevel)} />
+            <DetailsRow label="Photos (capped)" value={String(restaurant.places?.photoCount ?? '-')} />
+            <DetailsRow label="Hours present" value={restaurant.places?.hoursPresent ? 'yes' : 'no'} />
+            <DetailsRow label="Primary type" value={restaurant.places?.primaryType ?? '-'} />
+
+            <DetailsSection label="PAGESPEED - MOBILE" />
+            <DetailsRow
+              label="Performance score"
+              value={
+                restaurant.psiMobile
+                  ? String(restaurant.psiMobile.performance)
+                  : restaurant.psiMobileError
+                  ? 'err'
+                  : '...'
+              }
+              highlight={psiScoreColor(restaurant.psiMobile?.performance)}
+            />
+            <DetailsRow label="LCP lab" value={fmtMs(restaurant.psiMobile?.lcp)} />
+            <DetailsRow label="LCP field p75" value={fmtFieldMs(restaurant.psiMobile?.fieldLcp)} />
+            <DetailsRow label="CLS lab" value={fmtCls(restaurant.psiMobile?.cls)} />
+            <DetailsRow label="TBT lab" value={fmtMsRaw(restaurant.psiMobile?.tbt)} />
+            <DetailsRow label="TTFB" value={fmtMsRaw(restaurant.psiMobile?.ttfb)} />
+
+            <DetailsSection label="PAGESPEED - DESKTOP" />
+            <DetailsRow
+              label="Performance score"
+              value={
+                restaurant.psiDesktop
+                  ? String(restaurant.psiDesktop.performance)
+                  : restaurant.psiDesktopError
+                  ? 'err'
+                  : '...'
+              }
+              highlight={psiScoreColor(restaurant.psiDesktop?.performance)}
+            />
+            <DetailsRow label="LCP lab" value={fmtMs(restaurant.psiDesktop?.lcp)} />
+            <DetailsRow label="CLS lab" value={fmtCls(restaurant.psiDesktop?.cls)} />
+            <DetailsRow label="TBT lab" value={fmtMsRaw(restaurant.psiDesktop?.tbt)} />
+            <DetailsRow label="TTFB" value={fmtMsRaw(restaurant.psiDesktop?.ttfb)} />
+
+            <DetailsSection label="ON-PAGE SEO" />
+            <DetailsRow label="Status" value={String(restaurant.onpage?.statusCode ?? '-')} />
+            <DetailsRow
+              label="Title length"
+              value={restaurant.onpage?.titleLength ? `${restaurant.onpage.titleLength} chars` : 'missing'}
+            />
+            <DetailsRow
+              label="Meta desc length"
+              value={
+                restaurant.onpage?.metaDescriptionLength
+                  ? `${restaurant.onpage.metaDescriptionLength} chars`
+                  : 'missing'
+              }
+            />
+            <DetailsRow label="Canonical" value={restaurant.onpage?.canonical ? 'yes' : 'no'} />
+            <DetailsRow
+              label="H1 count"
+              value={String(restaurant.onpage?.h1Count ?? '-')}
+              highlight={
+                restaurant.onpage && restaurant.onpage.h1Count > 1 ? '#fee' : null
+              }
+            />
+            <DetailsRow label="H2 count" value={String(restaurant.onpage?.h2Count ?? '-')} />
+            <DetailsRow
+              label="Img missing alt"
+              value={
+                restaurant.onpage
+                  ? `${restaurant.onpage.imgWithoutAlt} of ${restaurant.onpage.imgCount}`
+                  : '-'
+              }
+            />
+            <DetailsRow
+              label="Open Graph"
+              value={restaurant.onpage?.openGraph.present ? 'yes' : 'no'}
+            />
+            <DetailsRow
+              label="og:image"
+              value={(() => {
+                const img = restaurant.onpage?.openGraph.image;
+                if (!img || img === 'false') return 'missing';
+                return 'set';
+              })()}
+            />
+            <DetailsRow
+              label="Twitter Card"
+              value={restaurant.onpage?.twitterCard ?? 'missing'}
+            />
+            <DetailsRow
+              label="Schema types"
+              value={(() => {
+                if (!restaurant.onpage?.schema.present) return 'none';
+                const types = restaurant.onpage.schema.types;
+                if (types.length === 0) return `${restaurant.onpage.schema.blockCount} block, no types`;
+                return types.join(', ');
+              })()}
+            />
+            <DetailsRow
+              label="Menu page"
+              value={(() => {
+                if (!restaurant.onpage) return '-';
+                if (!restaurant.onpage.menu.detected) return 'not found';
+                return restaurant.onpage.menu.format ?? 'detected';
+              })()}
+            />
+            <DetailsRow label="Word count" value={String(restaurant.onpage?.wordCount ?? '-')} />
+            <DetailsRow
+              label="HTML size"
+              value={restaurant.onpage ? `${restaurant.onpage.htmlSizeKb} KB` : '-'}
+            />
+          </tbody>
+        </table>
+      </div>
+    </details>
+  );
+}
+
+function DetailsSection({ label }: { label: string }) {
+  return (
+    <tr>
+      <td
+        colSpan={2}
+        style={{
+          padding: '14px 8px 6px',
+          fontSize: 11,
+          fontWeight: 600,
+          color: '#666',
+          textTransform: 'uppercase',
+          letterSpacing: 0.5,
+          borderTop: '1px solid #eee',
+        }}
+      >
+        {label}
+      </td>
+    </tr>
+  );
+}
+
+function DetailsRow({
+  label,
+  value,
+  highlight,
+}: {
+  label: string;
+  value: string;
+  highlight?: string | null;
+}) {
+  return (
+    <tr>
+      <td
+        style={{
+          padding: '6px 8px',
+          color: '#555',
+          borderBottom: '1px solid #f0f0f0',
+          verticalAlign: 'top',
+          width: '180px',
+          fontSize: 12,
+        }}
+      >
+        {label}
+      </td>
+      <td
+        style={{
+          padding: '6px 8px',
+          borderBottom: '1px solid #f0f0f0',
+          verticalAlign: 'top',
+          background: highlight ?? 'transparent',
+          fontFamily: 'monospace',
+          fontSize: 12,
+          wordBreak: 'break-word',
+        }}
+      >
+        {value}
+      </td>
+    </tr>
   );
 }
 
@@ -703,8 +907,7 @@ function FindingGroup({
   );
 }
 
-// Formatting helpers preserved for reuse in Phase 1F (Path A direct assessment).
-// These were used by the comparison table that was removed in this commit.
+// Formatting helpers used by DetailsPanel and preserved for reuse in Phase 1F.
 
 function fmtMs(ms: number | undefined): string {
   if (ms === undefined) return '...';
