@@ -155,6 +155,7 @@ export default function Home() {
   const [selectedAddress, setSelectedAddress] = useState<string | null>(null);
   const [categoryQuery, setCategoryQuery] = useState('');
   const [loadingDetails, setLoadingDetails] = useState(false);
+  const [sessionToken, setSessionToken] = useState<string | null>(null);
 
   // Debounced autocomplete fetch. Only runs when no selection is active and
   // input is at least 2 chars after trim. AbortController cancels stale
@@ -166,13 +167,21 @@ export default function Home() {
       return;
     }
 
+    let token = sessionToken;
+    if (!token) {
+      token = crypto.randomUUID();
+      setSessionToken(token);
+    }
+
     const controller = new AbortController();
     const handle = setTimeout(async () => {
       try {
-        const res = await fetch(
-          `/api/autocomplete?input=${encodeURIComponent(query.trim())}`,
-          { signal: controller.signal }
-        );
+        const params = new URLSearchParams();
+        params.set('input', query.trim());
+        params.set('sessionToken', token!);
+        const res = await fetch(`/api/autocomplete?${params.toString()}`, {
+          signal: controller.signal,
+        });
         if (!res.ok) {
           setAutocompleteError(`autocomplete ${res.status}`);
           return;
@@ -190,7 +199,7 @@ export default function Home() {
       clearTimeout(handle);
       controller.abort();
     };
-  }, [query, selectedPlaceId]);
+  }, [query, selectedPlaceId, sessionToken]);
 
   async function selectSuggestion(s: Suggestion) {
     setSelectedPlaceId(s.placeId);
@@ -202,9 +211,10 @@ export default function Home() {
     setCategoryQuery('');
 
     try {
-      const res = await fetch(
-        `/api/places?placeId=${encodeURIComponent(s.placeId)}`
-      );
+      const params = new URLSearchParams();
+      params.set('placeId', s.placeId);
+      if (sessionToken) params.set('sessionToken', sessionToken);
+      const res = await fetch(`/api/places?${params.toString()}`);
       if (res.ok) {
         const data: PlacesData = await res.json();
         const primaryType = data.primaryType ?? 'restaurant';
@@ -215,6 +225,9 @@ export default function Home() {
     }
 
     setLoadingDetails(false);
+    // Session is closed once Place Details is fetched. Clear the token so the
+    // next search after a "Change" action starts a fresh session.
+    setSessionToken(null);
   }
 
   function clearSelection() {
@@ -228,6 +241,7 @@ export default function Home() {
     setServerError(null);
     setServerElapsed(null);
     setTotalElapsed(null);
+    setSessionToken(null);
   }
 
   // Findings recompute whenever restaurant state changes (PSI calls finishing).
